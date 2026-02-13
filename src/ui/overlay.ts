@@ -3,6 +3,7 @@ import type { PoolContext } from "../core/poolContext";
 const ROOT_ID = "swap-ext-overlay-root";
 const LOG_PREFIX = "[SWAP-EXT]";
 const AXIOM_BASE_URL = "https://axiom.trade/meme/";
+const AXIOM_REF_SEGMENT = "@112233444";
 const DEXSCREENER_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens/";
 const GECKO_TERMINAL_TOKEN_POOLS_API = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/";
 const PAIR_CACHE_KEY = "axiomPairCache";
@@ -68,16 +69,38 @@ export interface OpenAxiomPopupOptions {
 }
 
 function storageGet<T>(key: string): Promise<T | undefined> {
-  if (typeof chrome === "undefined" || !chrome.storage?.local) return Promise.resolve(undefined);
+  if (typeof chrome === "undefined" || !chrome.storage?.local || !chrome.runtime?.id) return Promise.resolve(undefined);
   return new Promise((resolve) => {
-    chrome.storage.local.get([key], (result) => resolve(result?.[key] as T | undefined));
+    try {
+      chrome.storage.local.get([key], (result) => {
+        if (chrome.runtime.lastError) {
+          console.debug(LOG_PREFIX, "storageGet failed", chrome.runtime.lastError.message);
+          resolve(undefined);
+          return;
+        }
+        resolve(result?.[key] as T | undefined);
+      });
+    } catch (error) {
+      console.debug(LOG_PREFIX, "storageGet exception", error);
+      resolve(undefined);
+    }
   });
 }
 
 function storageSet(values: Record<string, unknown>): Promise<void> {
-  if (typeof chrome === "undefined" || !chrome.storage?.local) return Promise.resolve();
+  if (typeof chrome === "undefined" || !chrome.storage?.local || !chrome.runtime?.id) return Promise.resolve();
   return new Promise((resolve) => {
-    chrome.storage.local.set(values, () => resolve());
+    try {
+      chrome.storage.local.set(values, () => {
+        if (chrome.runtime.lastError) {
+          console.debug(LOG_PREFIX, "storageSet failed", chrome.runtime.lastError.message);
+        }
+        resolve();
+      });
+    } catch (error) {
+      console.debug(LOG_PREFIX, "storageSet exception", error);
+      resolve();
+    }
   });
 }
 
@@ -235,6 +258,7 @@ export async function buildAxiomUrl(context: PoolContext, side: TradeSide = "buy
   const pairAddress = await resolveBestPairAddress(mint);
   const resource = pairAddress || mint;
   const url = new URL(`${AXIOM_BASE_URL}${resource}`);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
   url.searchParams.set("chain", "sol");
   if (side === "sell") {
     // Best-effort hints; ignored safely if Axiom doesn't support some keys.

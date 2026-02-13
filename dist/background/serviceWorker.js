@@ -2,14 +2,73 @@ const LOG_PREFIX = "[SWAP-EXT]";
 const OPEN_AXIOM_POPUP = "swap-ext:open-axiom-popup";
 const POPUP_WIDTH = 420;
 const POPUP_HEIGHT = 720;
+const AXIOM_WINDOW_ID_KEY = "axiomPopupWindowId";
 let axiomPopupWindowId = null;
+
+function isAxiomUrl(url) {
+  return !!url && /^https:\/\/axiom\.trade\//.test(url);
+}
+
+function readStoredWindowId() {
+  return new Promise((resolve) => {
+    if (!chrome.storage || !chrome.storage.local) {
+      resolve(null);
+      return;
+    }
+    chrome.storage.local.get([AXIOM_WINDOW_ID_KEY], (result) => {
+      const value = result && result[AXIOM_WINDOW_ID_KEY];
+      resolve(typeof value === "number" ? value : null);
+    });
+  });
+}
+
+function writeStoredWindowId(windowId) {
+  return new Promise((resolve) => {
+    if (!chrome.storage || !chrome.storage.local) {
+      resolve();
+      return;
+    }
+    chrome.storage.local.set({ [AXIOM_WINDOW_ID_KEY]: windowId }, () => resolve());
+  });
+}
+
+function findExistingAxiomWindow() {
+  return new Promise((resolve) => {
+    chrome.windows.getAll({ populate: true }, (windows) => {
+      if (chrome.runtime.lastError || !Array.isArray(windows)) {
+        resolve(null);
+        return;
+      }
+
+      let fallbackId = null;
+      for (const w of windows) {
+        const hasAxiomTab = (w.tabs || []).some((t) => isAxiomUrl(t.url));
+        if (!hasAxiomTab || !w.id) continue;
+        if (w.type === "popup") {
+          resolve(w.id);
+          return;
+        }
+        fallbackId = fallbackId || w.id;
+      }
+
+      resolve(fallbackId);
+    });
+  });
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (axiomPopupWindowId === windowId) {
+    axiomPopupWindowId = null;
+    writeStoredWindowId(null);
+  }
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const msg = message;
   if (!msg || msg.type !== OPEN_AXIOM_POPUP) return;
 
   const url = msg.payload && msg.payload.url;
-  if (!url || !/^https:\/\/axiom\.trade\//.test(url)) {
+  if (!isAxiomUrl(url)) {
     sendResponse({ ok: false, error: "Invalid or missing Axiom URL" });
     return;
   }
@@ -34,6 +93,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         axiomPopupWindowId = createdWindow.id;
+        void writeStoredWindowId(createdWindow.id);
         console.debug(LOG_PREFIX, "Opened Axiom popup", {
           url,
           windowId: createdWindow.id,
@@ -45,7 +105,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     );
   };
 
-  const focusExistingOrOpen = (left, top) => {
+  const focusExistingOrOpen = async (left, top) => {
+    if (axiomPopupWindowId == null) {
+      axiomPopupWindowId = await readStoredWindowId();
+    }
+
+    if (axiomPopupWindowId == null) {
+      axiomPopupWindowId = await findExistingAxiomWindow();
+      if (axiomPopupWindowId != null) {
+        void writeStoredWindowId(axiomPopupWindowId);
+      }
+    }
+
     if (axiomPopupWindowId == null) {
       openWindow(left, top);
       return;
@@ -54,36 +125,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.windows.get(axiomPopupWindowId, { populate: true }, (existingWindow) => {
       if (chrome.runtime.lastError || !existingWindow || !existingWindow.id) {
         axiomPopupWindowId = null;
+        void writeStoredWindowId(null);
         openWindow(left, top);
-        return;
-      }
-
-      const firstTab = existingWindow.tabs && existingWindow.tabs[0];
-      if (firstTab && firstTab.id) {
-        chrome.tabs.update(firstTab.id, { url }, () => {
-          chrome.windows.update(existingWindow.id, { focused: true }, () => {
-            if (chrome.runtime.lastError) {
-              axiomPopupWindowId = null;
-              openWindow(left, top);
-              return;
-            }
-            console.debug(LOG_PREFIX, "Focused existing Axiom popup", {
-              url,
-              windowId: existingWindow.id
-            });
-            sendResponse({ ok: true });
-          });
-        });
         return;
       }
 
       chrome.windows.update(existingWindow.id, { focused: true }, () => {
         if (chrome.runtime.lastError) {
           axiomPopupWindowId = null;
+          void writeStoredWindowId(null);
           openWindow(left, top);
           return;
         }
-        console.debug(LOG_PREFIX, "Focused existing Axiom popup (no tab update)", {
+        console.debug(LOG_PREFIX, "Focused existing Axiom popup (no reload)", {
           windowId: existingWindow.id
         });
         sendResponse({ ok: true });

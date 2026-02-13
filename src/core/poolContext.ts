@@ -80,18 +80,38 @@ async function tryApiStrategy(poolAddress: string): Promise<Partial<PoolContext>
 }
 
 async function storageGet<T>(key: string): Promise<T | undefined> {
-  if (typeof chrome === "undefined" || !chrome.storage?.local) return undefined;
+  if (typeof chrome === "undefined" || !chrome.storage?.local || !chrome.runtime?.id) return undefined;
   return new Promise((resolve) => {
-    chrome.storage.local.get([key], (result) => {
-      resolve(result?.[key] as T | undefined);
-    });
+    try {
+      chrome.storage.local.get([key], (result) => {
+        if (chrome.runtime.lastError) {
+          console.debug(LOG_PREFIX, "storageGet failed", chrome.runtime.lastError.message);
+          resolve(undefined);
+          return;
+        }
+        resolve(result?.[key] as T | undefined);
+      });
+    } catch (error) {
+      console.debug(LOG_PREFIX, "storageGet exception", error);
+      resolve(undefined);
+    }
   });
 }
 
 async function storageSet(values: Record<string, unknown>): Promise<void> {
-  if (typeof chrome === "undefined" || !chrome.storage?.local) return;
+  if (typeof chrome === "undefined" || !chrome.storage?.local || !chrome.runtime?.id) return;
   return new Promise((resolve) => {
-    chrome.storage.local.set(values, () => resolve());
+    try {
+      chrome.storage.local.set(values, () => {
+        if (chrome.runtime.lastError) {
+          console.debug(LOG_PREFIX, "storageSet failed", chrome.runtime.lastError.message);
+        }
+        resolve();
+      });
+    } catch (error) {
+      console.debug(LOG_PREFIX, "storageSet exception", error);
+      resolve();
+    }
   });
 }
 
