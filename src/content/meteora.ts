@@ -1,0 +1,396 @@
+import { getPoolContext } from "../core/poolContext";
+import { closeOverlay, openAxiomPopup } from "../ui/overlay";
+
+const LOG_PREFIX = "[SWAP-EXT]";
+const BTN_ID = "swap-ext-meteora-btn";
+const FLOAT_LEFT_PX = 24;
+const FLOAT_BOTTOM_PX = 24;
+const FLOAT_SIZE_PX = 56;
+const BTN_GAP_PX = 15;
+const REPOSITION_INTERVAL_MS = 1200;
+const AXIOM_ICON_PATH = "icons/axiom-btn.png";
+const UI_CONFIG_KEY = "swapExtUi";
+let LAST_POSITION_MODE: "jupiter-container" | "jupiter-rect" | "fallback" | null = null;
+let hasEverAnchoredToJupiter = false;
+let routeCheckTimer: number | null = null;
+let lastSellWireAt = 0;
+const ROUTE_CHECK_DEBOUNCE_MS = 400;
+const SELL_WIRE_INTERVAL_MS = 5000;
+
+type UiConfig = {
+  sizePx: number;
+  gapPx: number;
+  offsetYPx: number;
+  iconScale: number;
+  matchJupSize: boolean;
+  fallbackLeftPx: number;
+  fallbackBottomPx: number;
+};
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getUiConfig(): UiConfig {
+  const fallback: UiConfig = {
+    sizePx: FLOAT_SIZE_PX,
+    gapPx: BTN_GAP_PX,
+    offsetYPx: 0,
+    iconScale: 1,
+    matchJupSize: true,
+    fallbackLeftPx: FLOAT_LEFT_PX + FLOAT_SIZE_PX + BTN_GAP_PX,
+    fallbackBottomPx: FLOAT_BOTTOM_PX
+  };
+
+  try {
+    const raw = localStorage.getItem(UI_CONFIG_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<UiConfig>;
+    return {
+      sizePx: clamp(Number(parsed.sizePx ?? fallback.sizePx), 24, 96),
+      gapPx: clamp(Number(parsed.gapPx ?? fallback.gapPx), 0, 120),
+      offsetYPx: clamp(Number(parsed.offsetYPx ?? fallback.offsetYPx), -100, 100),
+      iconScale: clamp(Number(parsed.iconScale ?? fallback.iconScale), 0.4, 1),
+      matchJupSize: typeof parsed.matchJupSize === "boolean" ? parsed.matchJupSize : fallback.matchJupSize,
+      fallbackLeftPx: clamp(Number(parsed.fallbackLeftPx ?? fallback.fallbackLeftPx), 0, 1000),
+      fallbackBottomPx: clamp(Number(parsed.fallbackBottomPx ?? fallback.fallbackBottomPx), 0, 1000)
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function getAxiomIconUrl(): string {
+  if (typeof chrome !== "undefined" && chrome.runtime?.getURL) {
+    return chrome.runtime.getURL(AXIOM_ICON_PATH);
+  }
+  return AXIOM_ICON_PATH;
+}
+
+function isDlmmPoolUrl(url: URL): boolean {
+  return /\/dlmm\/[^/?#]+/i.test(url.pathname);
+}
+
+const SHADOW_RESCAN_MS = 5000;
+const SHADOW_SCAN_MAX_NODES = 1200;
+let shadowRootsCache: ShadowRoot[] = [];
+let shadowRootsScannedAt = 0;
+
+function refreshShadowRootsCacheIfNeeded(): void {
+  const now = Date.now();
+  if (now - shadowRootsScannedAt < SHADOW_RESCAN_MS) return;
+  shadowRootsScannedAt = now;
+  shadowRootsCache = [];
+
+  const root = document.documentElement;
+  if (!root) return;
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let scanned = 0;
+  let node = walker.currentNode as Element | null;
+  while (node && scanned < SHADOW_SCAN_MAX_NODES) {
+    const shadow = (node as HTMLElement).shadowRoot;
+    if (shadow) shadowRootsCache.push(shadow);
+    scanned += 1;
+    node = walker.nextNode() as Element | null;
+  }
+}
+
+function findInAllRoots(selector: string): Element | null {
+  const direct = document.querySelector(selector);
+  if (direct) return direct;
+
+  refreshShadowRootsCacheIfNeeded();
+  for (const shadow of shadowRootsCache) {
+    const found = shadow.querySelector(selector);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function resolveAnchor(): HTMLElement | null {
+  const selectors = [
+    "main header",
+    "main [role='tablist']",
+    "main"
+  ];
+
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el instanceof HTMLElement) return el;
+  }
+
+  return document.body;
+}
+
+function findJupiterRoot(): HTMLElement | null {
+  const fixedRoot = findInAllRoots("div.fixed.bottom-6.left-6");
+  return fixedRoot instanceof HTMLElement ? fixedRoot : null;
+}
+
+function findJupiterPrimaryButton(): HTMLElement | null {
+  const fixedRoot = findJupiterRoot();
+  if (fixedRoot) {
+    const primary =
+      fixedRoot.querySelector(`:scope > div.h-14.w-14:not(#${BTN_ID})`) ||
+      fixedRoot.querySelector(":scope > div.h-14.w-14") ||
+      fixedRoot.firstElementChild ||
+      fixedRoot;
+    if (primary instanceof HTMLElement) {
+      if (primary.id === BTN_ID) return null;
+      const rect = primary.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return primary;
+    }
+  }
+
+  return null;
+}
+
+function findJupiterButtonRect(): DOMRect | null {
+  const primaryBtn = findJupiterPrimaryButton();
+  if (primaryBtn) {
+    const rect = primaryBtn.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return rect;
+  }
+
+  const fixedRoot = findInAllRoots("div.fixed.bottom-6.left-6");
+  if (fixedRoot instanceof HTMLElement) {
+    const primary = fixedRoot.querySelector(":scope > div.h-14.w-14") || fixedRoot.firstElementChild || fixedRoot;
+    if (primary instanceof HTMLElement) {
+      const rect = primary.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return rect;
+    }
+  }
+
+  const branded =
+    findInAllRoots("img[alt='Jupiter aggregator']") ||
+    findInAllRoots("img[src*='jup.ag/svg/jupiter-logo.svg']") ||
+    findInAllRoots("img[src*='jupiter-logo.svg']");
+  if (branded instanceof HTMLElement) {
+    const clickable = branded.closest("button, [role='button'], div.h-14.w-14, .h-14.w-14, .fixed.bottom-6.left-6");
+    if (clickable instanceof HTMLElement) {
+      const rect = clickable.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return rect;
+    }
+  }
+
+  const fallback = findInAllRoots("div.h-14.w-14.rounded-full.bg-black");
+  if (fallback instanceof HTMLElement) {
+    const rect = fallback.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return rect;
+  }
+  return null;
+}
+
+function applyFloatingButtonPosition(btn: HTMLButtonElement): void {
+  const now = Date.now();
+  const ui = getUiConfig();
+  const jupRect = findJupiterButtonRect();
+  if (jupRect) {
+    hasEverAnchoredToJupiter = true;
+    if (btn.parentElement !== document.body) document.body.appendChild(btn);
+    const effectiveSize = ui.matchJupSize ? Math.round(jupRect.height) : ui.sizePx;
+    btn.style.position = "fixed";
+    btn.style.width = `${effectiveSize}px`;
+    btn.style.height = `${effectiveSize}px`;
+    btn.style.left = `${Math.round(jupRect.right + ui.gapPx)}px`;
+    btn.style.bottom = `${Math.round(window.innerHeight - jupRect.bottom + (jupRect.height - effectiveSize) / 2 - ui.offsetYPx)}px`;
+    btn.style.top = "auto";
+    if (LAST_POSITION_MODE !== "jupiter") {
+      console.debug(LOG_PREFIX, "Button anchored next to Jupiter", {
+        left: btn.style.left,
+        bottom: btn.style.bottom
+      });
+      LAST_POSITION_MODE = "jupiter";
+    }
+    return;
+  }
+
+  if (hasEverAnchoredToJupiter) {
+    return;
+  }
+
+  if (btn.parentElement !== document.body) document.body.appendChild(btn);
+  btn.style.position = "fixed";
+  btn.style.left = `${ui.fallbackLeftPx}px`;
+  btn.style.top = "auto";
+  btn.style.bottom = `${ui.fallbackBottomPx}px`;
+  if (LAST_POSITION_MODE !== "fallback") {
+    console.debug(LOG_PREFIX, "Button using fallback position");
+    LAST_POSITION_MODE = "fallback";
+  }
+}
+
+function getAnchorRect(el: HTMLElement): { left: number; top: number; right: number; bottom: number } {
+  const r = el.getBoundingClientRect();
+  return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+}
+
+function ensureSwapButton(): void {
+  const existing = document.getElementById(BTN_ID);
+  if (existing instanceof HTMLButtonElement) {
+    applyFloatingButtonPosition(existing);
+    return;
+  }
+  const anchor = resolveAnchor();
+  if (!anchor) return;
+
+  const btn = document.createElement("button");
+  btn.id = BTN_ID;
+  btn.type = "button";
+  btn.title = "Sell on Axiom";
+  btn.setAttribute("aria-label", "Sell on Axiom");
+  btn.style.cssText = [
+    (() => {
+      const ui = getUiConfig();
+      return `width: ${ui.sizePx}px;height: ${ui.sizePx}px`;
+    })(),
+    "position: fixed",
+    `left: ${FLOAT_LEFT_PX}px`,
+    `bottom: ${FLOAT_BOTTOM_PX}px`,
+    "z-index: 2147483646",
+    "display: flex",
+    "box-sizing: border-box",
+    "padding: 0",
+    "margin: 0",
+    "line-height: 0",
+    "appearance: none",
+    "align-items: center",
+    "justify-content: center",
+    "overflow: hidden",
+    "border-radius: 999px",
+    "border: 0",
+    "background: transparent",
+    "box-shadow: none",
+    "cursor: pointer"
+  ].join(";");
+
+  const img = document.createElement("img");
+  img.src = getAxiomIconUrl();
+  img.style.width = "100%";
+  img.style.height = "100%";
+  img.style.display = "block";
+  img.style.objectFit = "cover";
+  img.style.borderRadius = "999px";
+  img.alt = "Axiom";
+  btn.appendChild(img);
+  anchor.appendChild(btn);
+  applyFloatingButtonPosition(btn);
+
+  btn.onclick = async () => {
+    const context = await getPoolContext();
+    console.debug(LOG_PREFIX, "Pool context", context);
+    await openAxiomPopup(context, { side: "sell", anchorRect: getAnchorRect(btn) });
+  };
+
+  console.debug(LOG_PREFIX, "Injected Swap button");
+}
+
+async function openFromPageSellButton(sourceButton?: HTMLElement): Promise<void> {
+  const context = await getPoolContext();
+  console.debug(LOG_PREFIX, "Pool context (sell button)", context);
+  if (sourceButton) {
+    await openAxiomPopup(context, { side: "sell", anchorRect: getAnchorRect(sourceButton) });
+    return;
+  }
+  await openAxiomPopup(context, { side: "sell" });
+}
+
+function wireNativeSellButtons(): void {
+  const candidates = Array.from(document.querySelectorAll("button, div.rounded-full, [role='button']"));
+  for (const el of candidates) {
+    if (!(el instanceof HTMLElement)) continue;
+    if (el.dataset.swapExtSellHooked === "1") continue;
+
+    const directLabel = (el.textContent || "").trim().toLowerCase();
+    const spanLabel = (el.querySelector("span")?.textContent || "").trim().toLowerCase();
+    const isSell = directLabel === "sell" || spanLabel === "sell";
+    if (!isSell) continue;
+
+    el.dataset.swapExtSellHooked = "1";
+    el.addEventListener("click", () => {
+      openFromPageSellButton(el).catch((error) => {
+        console.debug(LOG_PREFIX, "Sell button hook failed", error);
+      });
+    });
+    console.debug(LOG_PREFIX, "Hooked native Sell control");
+  }
+}
+
+function cleanupForNonPoolPages(): void {
+  const btn = document.getElementById(BTN_ID);
+  if (btn) btn.remove();
+  closeOverlay();
+}
+
+function onRouteMaybeChanged(): void {
+  const url = new URL(window.location.href);
+  if (!isDlmmPoolUrl(url)) {
+    cleanupForNonPoolPages();
+    return;
+  }
+  ensureSwapButton();
+  const now = Date.now();
+  if (now - lastSellWireAt > SELL_WIRE_INTERVAL_MS) {
+    wireNativeSellButtons();
+    lastSellWireAt = now;
+  }
+}
+
+function scheduleRouteCheck(): void {
+  if (routeCheckTimer !== null) return;
+  routeCheckTimer = window.setTimeout(() => {
+    routeCheckTimer = null;
+    onRouteMaybeChanged();
+  }, ROUTE_CHECK_DEBOUNCE_MS);
+}
+
+function watchForAnchor(): void {
+  const observer = new MutationObserver(() => {
+    scheduleRouteCheck();
+  });
+
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true
+  });
+
+  scheduleRouteCheck();
+
+  window.setInterval(() => {
+    const el = document.getElementById(BTN_ID);
+    if (el instanceof HTMLButtonElement) applyFloatingButtonPosition(el);
+  }, REPOSITION_INTERVAL_MS);
+
+  window.addEventListener("resize", () => {
+    const el = document.getElementById(BTN_ID);
+    if (el instanceof HTMLButtonElement) applyFloatingButtonPosition(el);
+  });
+}
+
+function patchHistoryForSpaNavigation(): void {
+  const push = history.pushState;
+  const replace = history.replaceState;
+
+  history.pushState = function (...args) {
+    push.apply(this, args as never);
+    window.dispatchEvent(new Event("swap-ext:urlchange"));
+  };
+
+  history.replaceState = function (...args) {
+    replace.apply(this, args as never);
+    window.dispatchEvent(new Event("swap-ext:urlchange"));
+  };
+
+  window.addEventListener("popstate", () => window.dispatchEvent(new Event("swap-ext:urlchange")));
+  window.addEventListener("swap-ext:urlchange", scheduleRouteCheck);
+}
+
+function init(): void {
+  console.debug(LOG_PREFIX, "Initializing Meteora injector");
+  patchHistoryForSpaNavigation();
+  watchForAnchor();
+}
+
+init();

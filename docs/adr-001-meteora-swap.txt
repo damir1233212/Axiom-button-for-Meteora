@@ -1,0 +1,29 @@
+ADR-001: Meteora DLMM Swap Button Injection
+
+Date: 2026-02-12
+Status: Proposed (Prototype implemented)
+
+Context
+- Need an extension-injected Swap entrypoint on Meteora DLMM pool pages.
+- Need robust token mint extraction on SPA pages and a minimal overlay UI.
+- Full swap implementation is undecided.
+
+Options considered
+A) Deep-link into Axiom with prefilled tokens.
+B) In-page overlay iframe to Axiom pool/token page.
+C) In-page custom swap implementation.
+
+Decision
+- Primary path: open Axiom in extension popup window via `chrome.windows.create`.
+- Fallback path: show explicit "Open Axiom" button in-page if popup creation fails.
+
+Rationale
+- Keeps swap execution on Axiom as product requirement.
+- Avoids `X-Frame-Options`/CSP frame restrictions that cause `refused to connect`.
+- Popup window gives compact minimal-swap UX without iframe risks.
+- For token CA inputs, extension resolves the most liquid Solana pair (DexScreener ranking) and opens that pair address on Axiom.
+
+Consequences
+- Extension no longer attempts iframe embedding for Axiom.
+- Background service worker is required for popup creation.
+- Keep extraction logic independent from routing target (Axiom URL builder can change).
