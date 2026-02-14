@@ -17,6 +17,8 @@ interface DexScreenerPair {
   chainId?: string;
   dexId?: string;
   pairAddress?: string;
+  baseToken?: { address?: string };
+  quoteToken?: { address?: string };
   liquidity?: { usd?: number };
   volume?: { h24?: number };
   txns?: { h24?: { buys?: number; sells?: number } };
@@ -66,6 +68,23 @@ export interface PopupAnchorRect {
 export interface OpenAxiomPopupOptions {
   side?: TradeSide;
   anchorRect?: PopupAnchorRect;
+  autoSellAll?: boolean;
+}
+
+type AxiomAddressMode = "auto" | "pair" | "mint" | "pool";
+
+function isBase58Address(value: string | null | undefined): value is string {
+  return !!value && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+}
+
+function getAxiomAddressMode(): AxiomAddressMode {
+  try {
+    const raw = (window.localStorage.getItem("swapExtAxiomAddressMode") || "pool").toLowerCase();
+    if (raw === "pair" || raw === "mint" || raw === "pool" || raw === "auto") return raw;
+  } catch {
+    // ignore
+  }
+  return "pool";
 }
 
 function storageGet<T>(key: string): Promise<T | undefined> {
@@ -106,12 +125,21 @@ function storageSet(values: Record<string, unknown>): Promise<void> {
 
 function chooseAxiomMint(context: PoolContext): string | null {
   const stableLike = new Set(["SOL", "USDC", "USDT"]);
+  const stableLikeMints = new Set([
+    "So11111111111111111111111111111111111111112", // SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+    "Es9vMFrzaCERmJfrF4H2FYD8V4o5V8xYV7F6fM9wY7m" // USDT
+  ]);
   const baseSym = (context.baseSymbol || "").toUpperCase();
   const quoteSym = (context.quoteSymbol || "").toUpperCase();
   const isAllowed = (mint: string | null): mint is string => !!mint && mint !== context.poolAddress;
+  const isStableLike = (mint: string | null, sym: string): boolean => {
+    if (!mint) return stableLike.has(sym);
+    return stableLike.has(sym) || stableLikeMints.has(mint);
+  };
 
-  if (isAllowed(context.baseMint) && !stableLike.has(baseSym)) return context.baseMint;
-  if (isAllowed(context.quoteMint) && !stableLike.has(quoteSym)) return context.quoteMint;
+  if (isAllowed(context.baseMint) && !isStableLike(context.baseMint, baseSym)) return context.baseMint;
+  if (isAllowed(context.quoteMint) && !isStableLike(context.quoteMint, quoteSym)) return context.quoteMint;
   if (isAllowed(context.baseMint)) return context.baseMint;
   if (isAllowed(context.quoteMint)) return context.quoteMint;
   return null;
@@ -122,11 +150,8 @@ const AXIOM_PREFERRED_DEXES = new Set(["pumpswap", "raydium", "meteora", "orca",
 function pairScore(pair: DexScreenerPair): number {
   const liquidity = Number(pair.liquidity?.usd || 0);
   const volume24h = Number(pair.volume?.h24 || 0);
-  const buys = Number(pair.txns?.h24?.buys || 0);
-  const sells = Number(pair.txns?.h24?.sells || 0);
-  const dexBoost = AXIOM_PREFERRED_DEXES.has((pair.dexId || "").toLowerCase()) ? 1_000_000_000 : 0;
-
-  return dexBoost + liquidity * 100 + volume24h * 10 + (buys + sells);
+  // Primary sort key: liquidity. Volume is only a tie-breaker.
+  return liquidity * 1_000_000 + volume24h;
 }
 
 function isLikelyPairAddress(value: string): boolean {
@@ -158,7 +183,13 @@ async function writePairCache(tokenMint: string, pairAddress: string): Promise<v
   await storageSet({ [PAIR_CACHE_KEY]: cache });
 }
 
-async function resolveBestPairAddress(tokenMint: string): Promise<string | null> {
+function matchesCounterMint(pair: DexScreenerPair, tokenMint: string, counterMint: string): boolean {
+  const base = pair.baseToken?.address;
+  const quote = pair.quoteToken?.address;
+  return (base === tokenMint && quote === counterMint) || (base === counterMint && quote === tokenMint);
+}
+
+async function resolveBestPairAddress(tokenMint: string, preferredCounterMint?: string | null): Promise<string | null> {
   const cached = await readPairCache(tokenMint);
   if (cached) {
     console.debug(LOG_PREFIX, "Pair cache hit", { tokenMint, pairAddress: cached });
@@ -174,7 +205,12 @@ async function resolveBestPairAddress(tokenMint: string): Promise<string | null>
     );
     if (!solPairs.length) return null;
 
-    const best = solPairs.sort((a, b) => pairScore(b) - pairScore(a))[0];
+    const filtered =
+      preferredCounterMint && isLikelyPairAddress(preferredCounterMint)
+        ? solPairs.filter((p) => matchesCounterMint(p, tokenMint, preferredCounterMint))
+        : [];
+    const candidatePairs = filtered.length ? filtered : solPairs;
+    const best = candidatePairs.sort((a, b) => pairScore(b) - pairScore(a))[0];
     const bestAddress = best.pairAddress || null;
     if (!bestAddress) return null;
 
@@ -251,39 +287,36 @@ async function resolveBestPairAddress(tokenMint: string): Promise<string | null>
   return bestAddress;
 }
 
-export async function buildAxiomUrl(context: PoolContext, side: TradeSide = "buy"): Promise<string> {
+export async function buildAxiomUrl(
+  context: PoolContext,
+  side: TradeSide = "buy",
+  options: { autoSellAll?: boolean } = {}
+): Promise<string> {
   const mint = chooseAxiomMint(context);
   if (!mint) {
     const fallbackResource = context.poolAddress && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(context.poolAddress) ? context.poolAddress : null;
     if (!fallbackResource) return "https://axiom.trade/?chain=sol";
     const fallbackUrl = new URL(`${AXIOM_BASE_URL}${fallbackResource}`);
-    fallbackUrl.pathname = `${fallbackUrl.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+    if (!options.autoSellAll) {
+      fallbackUrl.pathname = `${fallbackUrl.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+    }
     fallbackUrl.searchParams.set("chain", "sol");
     return fallbackUrl.toString();
   }
 
-  const resource = mint;
+  const preferredCounterMint =
+    context.baseMint === mint ? context.quoteMint : context.quoteMint === mint ? context.baseMint : null;
+  const pairAddress = await resolveBestPairAddress(mint, preferredCounterMint);
+  const poolAddress = isBase58Address(context.poolAddress) ? context.poolAddress : null;
+  // Open the most liquid pair on Axiom; if Meteora pool is that pair, it is used naturally.
+  const resource = pairAddress || poolAddress || mint;
   const url = new URL(`${AXIOM_BASE_URL}${resource}`);
-  url.pathname = `${url.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+  if (!options.autoSellAll) {
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+  }
   url.searchParams.set("chain", "sol");
   if (side === "sell") {
-    // Best-effort hints; ignored safely if Axiom doesn't support some keys.
-    url.searchParams.set("swapExtSide", "sell");
-    url.searchParams.set("side", "sell");
-    url.searchParams.set("action", "sell");
-    url.searchParams.set("mode", "sell");
-    url.searchParams.set("tab", "sell");
-    url.searchParams.set("trade", "sell");
-
-    const outputMint = context.baseMint === mint ? context.quoteMint : context.baseMint;
-    if (mint) {
-      url.searchParams.set("inputMint", mint);
-      url.searchParams.set("fromMint", mint);
-    }
-    if (outputMint) {
-      url.searchParams.set("outputMint", outputMint);
-      url.searchParams.set("toMint", outputMint);
-    }
+    // Keep sell routing minimal to avoid breaking Axiom page load.
     url.hash = "sell";
   }
   return url.toString();
@@ -368,7 +401,7 @@ export function closeOverlay(): void {
 
 export async function openAxiomPopup(context: PoolContext, options: OpenAxiomPopupOptions = {}): Promise<void> {
   const side = options.side || "buy";
-  const url = await buildAxiomUrl(context, side);
+  const url = await buildAxiomUrl(context, side, { autoSellAll: options.autoSellAll === true });
   const pos = computePopupPosition(options.anchorRect);
   console.debug(LOG_PREFIX, "Request popup open", { url });
 
@@ -377,7 +410,14 @@ export async function openAxiomPopup(context: PoolContext, options: OpenAxiomPop
       chrome.runtime.sendMessage(
         {
           type: "swap-ext:open-axiom-popup",
-          payload: { url, left: pos.left, top: pos.top, poolAddress: context.poolAddress || undefined }
+          payload: {
+            url,
+            left: pos.left,
+            top: pos.top,
+            poolAddress: context.poolAddress || undefined,
+            autoSellAll: options.autoSellAll === true,
+            forceReload: options.autoSellAll === true
+          }
         },
         (res: OpenAxiomPopupResponse | undefined) => {
           if (chrome.runtime.lastError) {

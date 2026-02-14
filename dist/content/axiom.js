@@ -1,8 +1,16 @@
 (() => {
   const LOG_PREFIX = "[SWAP-EXT]";
   const URL_SIGNAL_KEYS = ["swapExtSide", "side", "action", "mode", "tab", "trade"];
+  const RUN_AUTO_SELL_ALL = "swap-ext:run-auto-sell-all";
+  const AXIOM_AUTO_SELL_REQUEST_KEY = "swapExtAxiomAutoSellRequest";
+  const AXIOM_AUTO_SELL_REQUEST_TTL_MS = 2 * 60 * 1000;
   const MAX_ATTEMPTS = 40;
   const ATTEMPT_INTERVAL_MS = 350;
+  const QUICK_AUTO_SELL_MAX_ATTEMPTS = 240;
+  const QUICK_AUTO_SELL_INTERVAL_MS = 750;
+  const AUTO_SELL_COOLDOWN_MS = 9000;
+  let quickAutoSellRunning = false;
+  let lastQuickAutoSellAt = 0;
 
   function wantsSell() {
     const url = new URL(window.location.href);
@@ -51,25 +59,164 @@
     el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
   }
 
-  function initSellAutoselect() {
-    if (!wantsSell()) return;
+  function findSellMaxControl() {
+    const buttons = Array.from(document.querySelectorAll("button"));
+    for (const node of buttons) {
+      if (!(node instanceof HTMLElement)) continue;
+      const label = (node.textContent || "").replace(/\s+/g, "").toLowerCase();
+      if (label !== "100%") continue;
+      if (!isVisible(node)) continue;
+      if (!/decrease/i.test(node.className)) continue;
+      return node;
+    }
 
-    console.debug(LOG_PREFIX, "Axiom sell autoselect active");
+    for (const node of buttons) {
+      if (!(node instanceof HTMLElement)) continue;
+      const label = (node.textContent || "").replace(/\s+/g, "").toLowerCase();
+      if (label !== "100%") continue;
+      if (!isVisible(node)) continue;
+      return node;
+    }
+    return null;
+  }
+
+  function clickAnyControl(el) {
+    if (typeof el.click === "function") {
+      el.click();
+    }
+    el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  }
+
+  function isControlDisabled(el) {
+    const button = el;
+    const ariaDisabled = (el.getAttribute("aria-disabled") || "").toLowerCase() === "true";
+    return !!button.disabled || ariaDisabled;
+  }
+
+  function parseAmount(value) {
+    const normalized = value.replace(/,/g, ".").replace(/[^\d.]/g, "");
+    const amount = Number(normalized);
+    return Number.isFinite(amount) ? amount : 0;
+  }
+
+  function hasPositiveSellAmount() {
+    const inputs = Array.from(document.querySelectorAll("input[type='text'], input[inputmode='decimal']"));
+    for (const input of inputs) {
+      if (!(input instanceof HTMLInputElement)) continue;
+      const amount = parseAmount(input.value || "");
+      if (amount > 0) return true;
+    }
+    return false;
+  }
+
+  function hasZeroTokensMessage() {
+    const text = (document.body && document.body.innerText || "").toLowerCase();
+    return text.includes("transaction failed to send: you have 0 tokens");
+  }
+
+  function hasTransactionConfirmedMessage() {
+    const text = (document.body && document.body.innerText || "").toLowerCase();
+    return text.includes("transaction confirmed!");
+  }
+
+  function findSellSubmitButton() {
+    const buttons = Array.from(document.querySelectorAll("button"));
+    for (const node of buttons) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (!isVisible(node)) continue;
+      if (isControlDisabled(node)) continue;
+      const label = (node.textContent || "").trim().toLowerCase();
+      if (label !== "sell") continue;
+      const cls = node.className || "";
+      if (/border-decrease\/50/.test(cls) || /text-decrease/.test(cls)) continue;
+      return node;
+    }
+    return null;
+  }
+
+  function runAutoSellAllQuick(reason) {
+    const now = Date.now();
+    if (quickAutoSellRunning) {
+      return;
+    }
+    if (now - lastQuickAutoSellAt < AUTO_SELL_COOLDOWN_MS) {
+      return;
+    }
+    quickAutoSellRunning = true;
+    lastQuickAutoSellAt = now;
+    let attempts = 0;
+
+    const finish = () => {
+      quickAutoSellRunning = false;
+      lastQuickAutoSellAt = Date.now();
+    };
+
+    const step = () => {
+      attempts += 1;
+      if (hasTransactionConfirmedMessage()) {
+        finish();
+        return;
+      }
+      if (hasZeroTokensMessage()) {
+      }
+      if (hasPositiveSellAmount()) {
+      }
+
+      const sell = findSellControl();
+      if (sell) clickSellControl(sell);
+
+      const maxBtn = findSellMaxControl();
+      if (maxBtn && !isControlDisabled(maxBtn)) {
+        clickAnyControl(maxBtn);
+      }
+
+      const submit = findSellSubmitButton();
+      if (submit) {
+        clickAnyControl(submit);
+      }
+
+      if (hasTransactionConfirmedMessage()) {
+        finish();
+        return;
+      }
+      if (attempts >= QUICK_AUTO_SELL_MAX_ATTEMPTS) {
+        finish();
+        return;
+      }
+      window.setTimeout(step, QUICK_AUTO_SELL_INTERVAL_MS);
+    };
+
+    window.setTimeout(step, 500);
+  }
+
+  function initSellAutoselect(shouldAutoSellMax) {
+    const force = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : false;
+    if (!force && !wantsSell()) return;
 
     let attempts = 0;
     const timer = window.setInterval(() => {
       attempts += 1;
-      const sell = findSellControl();
-      if (sell) {
-        clickSellControl(sell);
-        console.debug(LOG_PREFIX, "Axiom Sell control clicked");
+      if (shouldAutoSellMax && hasPositiveSellAmount()) {
         window.clearInterval(timer);
         observer.disconnect();
         return;
       }
 
+        const sell = findSellControl();
+      if (sell) {
+        clickSellControl(sell);
+        if (shouldAutoSellMax) runAutoSellAllQuick("route");
+        if (!shouldAutoSellMax) {
+          window.clearInterval(timer);
+          observer.disconnect();
+        }
+        return;
+      }
+
       if (attempts >= MAX_ATTEMPTS) {
-        console.debug(LOG_PREFIX, "Axiom Sell control not found");
         window.clearInterval(timer);
         observer.disconnect();
       }
@@ -79,13 +226,41 @@
       const sell = findSellControl();
       if (!sell) return;
       clickSellControl(sell);
-      console.debug(LOG_PREFIX, "Axiom Sell control clicked (observer)");
-      window.clearInterval(timer);
-      observer.disconnect();
+      if (shouldAutoSellMax) runAutoSellAllQuick("observer");
+      if (!shouldAutoSellMax) {
+        window.clearInterval(timer);
+        observer.disconnect();
+      }
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
-  initSellAutoselect();
+  async function init() {
+    initSellAutoselect(false);
+
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && chrome.runtime && chrome.runtime.id) {
+      chrome.storage.local.get([AXIOM_AUTO_SELL_REQUEST_KEY], (result) => {
+        if (chrome.runtime.lastError) return;
+        const payload = result && result[AXIOM_AUTO_SELL_REQUEST_KEY];
+        const ts = Number((payload && payload.ts) || 0);
+        const isFresh = ts > 0 && Date.now() - ts <= AXIOM_AUTO_SELL_REQUEST_TTL_MS;
+        if (!isFresh) return;
+        chrome.storage.local.remove([AXIOM_AUTO_SELL_REQUEST_KEY], () => {
+          runAutoSellAllQuick("storage");
+        });
+      });
+    }
+
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+        if (!message || message.type !== RUN_AUTO_SELL_ALL) return;
+        runAutoSellAllQuick("message");
+        sendResponse && sendResponse({ ok: true });
+        return true;
+      });
+    }
+  }
+
+  void init();
 })();

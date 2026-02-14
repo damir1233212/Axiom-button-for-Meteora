@@ -53,5 +53,4 @@ Chrome extension that injects a floating **Axiom** button on Meteora DLMM pages 
 
 ## Disclaimer
 
-This is a prototype extension. Use at your own risk. Always verify token/pair details before signing transactions.
-
+Use at your own risk. Always verify token/pair details before signing transactions.

@@ -1,6 +1,7 @@
 (() => {
   const LOG_PREFIX = "[SWAP-EXT]";
   const BTN_ID = "swap-ext-meteora-btn";
+  const EXIT_BTN_ID = "swap-ext-withdraw-axiom-btn";
   const ROOT_ID = "swap-ext-overlay-root";
   const FLOAT_LEFT_PX = 24;
   const FLOAT_BOTTOM_PX = 31;
@@ -10,6 +11,7 @@
   const PANEL_GAP_PX = 15;
   const AXIOM_ICON_PATH = "icons/axiom-btn.png";
   const UI_CONFIG_KEY = "swapExtUi";
+  const TRIGGER_AUTO_SELL_ALL = "swap-ext:trigger-auto-sell-all";
   let LAST_POSITION_MODE = null;
   let isPositionLocked = false;
   let routeCheckTimer = null;
@@ -75,14 +77,12 @@
       try {
         chrome.storage.local.get([key], (result) => {
           if (chrome.runtime.lastError) {
-            console.debug(LOG_PREFIX, "storageGet failed", chrome.runtime.lastError.message);
             resolve(undefined);
             return;
           }
           resolve(result ? result[key] : undefined);
         });
       } catch (error) {
-        console.debug(LOG_PREFIX, "storageGet exception", error);
         resolve(undefined);
       }
     });
@@ -96,12 +96,10 @@
       try {
         chrome.storage.local.set(values, () => {
           if (chrome.runtime.lastError) {
-            console.debug(LOG_PREFIX, "storageSet failed", chrome.runtime.lastError.message);
           }
           resolve();
         });
       } catch (error) {
-        console.debug(LOG_PREFIX, "storageSet exception", error);
         resolve();
       }
     });
@@ -109,24 +107,45 @@
 
   function chooseAxiomMint(context) {
     const stableLike = new Set(["SOL", "USDC", "USDT"]);
+    const stableLikeMints = new Set([
+      "So11111111111111111111111111111111111111112",
+      "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "Es9vMFrzaCERmJfrF4H2FYD8V4o5V8xYV7F6fM9wY7m"
+    ]);
     const baseSym = String(context.baseSymbol || "").toUpperCase();
     const quoteSym = String(context.quoteSymbol || "").toUpperCase();
     const isAllowed = (mint) => !!mint && mint !== context.poolAddress;
+    const isStableLike = (mint, sym) => {
+      if (!mint) return stableLike.has(sym);
+      return stableLike.has(sym) || stableLikeMints.has(mint);
+    };
 
-    if (isAllowed(context.baseMint) && !stableLike.has(baseSym)) return context.baseMint;
-    if (isAllowed(context.quoteMint) && !stableLike.has(quoteSym)) return context.quoteMint;
+    if (isAllowed(context.baseMint) && !isStableLike(context.baseMint, baseSym)) return context.baseMint;
+    if (isAllowed(context.quoteMint) && !isStableLike(context.quoteMint, quoteSym)) return context.quoteMint;
     if (isAllowed(context.baseMint)) return context.baseMint;
     if (isAllowed(context.quoteMint)) return context.quoteMint;
     return null;
   }
 
+  function isBase58Address(value) {
+    return !!value && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+  }
+
+  function getAxiomAddressMode() {
+    try {
+      const raw = (window.localStorage.getItem("swapExtAxiomAddressMode") || "pool").toLowerCase();
+      if (raw === "pair" || raw === "mint" || raw === "pool" || raw === "auto") return raw;
+    } catch {
+      // ignore
+    }
+    return "pool";
+  }
+
   function pairScore(pair) {
     const liquidity = Number((pair.liquidity && pair.liquidity.usd) || 0);
     const volume24h = Number((pair.volume && pair.volume.h24) || 0);
-    const buys = Number((pair.txns && pair.txns.h24 && pair.txns.h24.buys) || 0);
-    const sells = Number((pair.txns && pair.txns.h24 && pair.txns.h24.sells) || 0);
-    const dexBoost = AXIOM_PREFERRED_DEXES.has(String(pair.dexId || "").toLowerCase()) ? 1000000000 : 0;
-    return dexBoost + liquidity * 100 + volume24h * 10 + (buys + sells);
+    // Primary sort key: liquidity. Volume is only a tie-breaker.
+    return liquidity * 1000000 + volume24h;
   }
 
   function isLikelyPairAddress(value) {
@@ -155,10 +174,15 @@
     await storageSet({ [PAIR_CACHE_KEY]: cache });
   }
 
-  async function resolveBestPairAddress(tokenMint) {
+  function matchesCounterMint(pair, tokenMint, counterMint) {
+    const base = pair.baseToken && pair.baseToken.address;
+    const quote = pair.quoteToken && pair.quoteToken.address;
+    return (base === tokenMint && quote === counterMint) || (base === counterMint && quote === tokenMint);
+  }
+
+  async function resolveBestPairAddress(tokenMint, preferredCounterMint) {
     const cached = await readPairCache(tokenMint);
     if (cached) {
-      console.debug(LOG_PREFIX, "Pair cache hit", { tokenMint, pairAddress: cached });
       return cached;
     }
 
@@ -172,11 +196,16 @@
       );
       if (!solPairs.length) return null;
 
-      const best = solPairs.sort((a, b) => pairScore(b) - pairScore(a))[0];
+      const filtered =
+        preferredCounterMint && isLikelyPairAddress(preferredCounterMint)
+          ? solPairs.filter((p) => matchesCounterMint(p, tokenMint, preferredCounterMint))
+          : [];
+      const candidatePairs = filtered.length ? filtered : solPairs;
+      const best = candidatePairs.sort((a, b) => pairScore(b) - pairScore(a))[0];
       const bestAddress = best && best.pairAddress;
       if (!bestAddress) return null;
 
-      console.debug(LOG_PREFIX, "Resolved best pair via DexScreener", {
+      (void 0) && console.debug(LOG_PREFIX, "Resolved best pair via DexScreener", {
         tokenMint,
         pairAddress: bestAddress,
         dexId: best.dexId,
@@ -211,7 +240,7 @@
       const bestAddress = best && best.attributes && best.attributes.address;
       if (!bestAddress) return null;
 
-      console.debug(LOG_PREFIX, "Resolved best pair via GeckoTerminal", {
+      (void 0) && console.debug(LOG_PREFIX, "Resolved best pair via GeckoTerminal", {
         tokenMint,
         pairAddress: bestAddress,
         dexId: best.attributes && best.attributes.dex_id,
@@ -225,19 +254,16 @@
     try {
       bestAddress = await tryDexScreener();
     } catch (error) {
-      console.debug(LOG_PREFIX, "DexScreener resolution failed", error);
     }
 
     if (!bestAddress) {
       try {
         bestAddress = await tryGeckoTerminal();
       } catch (error) {
-        console.debug(LOG_PREFIX, "GeckoTerminal resolution failed", error);
       }
     }
 
     if (!bestAddress) {
-      console.debug(LOG_PREFIX, "Pair resolution failed on all providers", { tokenMint });
       return null;
     }
 
@@ -247,40 +273,33 @@
 
   async function buildAxiomUrl(context) {
     const side = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : "buy";
+    const options = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
     const mint = chooseAxiomMint(context);
     if (!mint) {
       const fallbackResource =
         context.poolAddress && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(context.poolAddress) ? context.poolAddress : null;
       if (!fallbackResource) return "https://axiom.trade/?chain=sol";
       const fallbackUrl = new URL(`${AXIOM_BASE_URL}${fallbackResource}`);
-      fallbackUrl.pathname = `${fallbackUrl.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+      if (!options.autoSellAll) {
+        fallbackUrl.pathname = `${fallbackUrl.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+      }
       fallbackUrl.searchParams.set("chain", "sol");
       return fallbackUrl.toString();
     }
 
-    const pairAddress = await resolveBestPairAddress(mint);
-    const resource = pairAddress || mint;
+    const preferredCounterMint =
+      context.baseMint === mint ? context.quoteMint : context.quoteMint === mint ? context.baseMint : null;
+    const pairAddress = await resolveBestPairAddress(mint, preferredCounterMint);
+    const poolAddress = isBase58Address(context.poolAddress) ? context.poolAddress : null;
+    // Open the most liquid pair on Axiom; if Meteora pool is that pair, it is used naturally.
+    const resource = pairAddress || poolAddress || mint;
     const url = new URL(`${AXIOM_BASE_URL}${resource}`);
-    url.pathname = `${url.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+    if (!options.autoSellAll) {
+      url.pathname = `${url.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+    }
     url.searchParams.set("chain", "sol");
     if (side === "sell") {
-      // Best-effort hints; ignored safely if Axiom doesn't support some keys.
-      url.searchParams.set("swapExtSide", "sell");
-      url.searchParams.set("side", "sell");
-      url.searchParams.set("action", "sell");
-      url.searchParams.set("mode", "sell");
-      url.searchParams.set("tab", "sell");
-      url.searchParams.set("trade", "sell");
-
-      const outputMint = context.baseMint === mint ? context.quoteMint : context.baseMint;
-      if (mint) {
-        url.searchParams.set("inputMint", mint);
-        url.searchParams.set("fromMint", mint);
-      }
-      if (outputMint) {
-        url.searchParams.set("outputMint", outputMint);
-        url.searchParams.set("toMint", outputMint);
-      }
+      // Keep sell routing minimal to avoid breaking Axiom page load.
       url.hash = "sell";
     }
     return url.toString();
@@ -362,16 +381,22 @@
   async function openAxiomPopup(context) {
     const options = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
     const side = options.side || "buy";
-    const url = await buildAxiomUrl(context, side);
+    const url = await buildAxiomUrl(context, side, { autoSellAll: options.autoSellAll === true });
     const pos = computePopupPosition(options.anchorRect);
-    console.debug(LOG_PREFIX, "Request popup open", { url });
 
     try {
       const response = await new Promise((resolve) => {
         chrome.runtime.sendMessage(
         {
           type: "swap-ext:open-axiom-popup",
-          payload: { url, left: pos.left, top: pos.top, poolAddress: context.poolAddress || undefined }
+          payload: {
+            url,
+            left: pos.left,
+            top: pos.top,
+            poolAddress: context.poolAddress || undefined,
+            autoSellAll: options.autoSellAll === true,
+            forceReload: options.autoSellAll === true
+          }
         },
           (res) => {
             if (chrome.runtime.lastError) {
@@ -384,10 +409,8 @@
       });
 
       if (response && response.ok) return;
-      console.debug(LOG_PREFIX, "Popup request failed, fallback to manual open", response && response.error);
       showManualOpenButton(url, options.anchorRect);
     } catch (error) {
-      console.debug(LOG_PREFIX, "Popup request exception", error);
       showManualOpenButton(url, options.anchorRect);
     }
   }
@@ -509,8 +532,6 @@
       await storageSet({ [CACHE_KEY]: store });
       return null;
     }
-
-    console.debug(LOG_PREFIX, "Cache hit for pool", poolAddress);
     return entry.value;
   }
 
@@ -530,7 +551,6 @@
     const cluster = parseCluster(url);
 
     if (!poolAddress) {
-      console.debug(LOG_PREFIX, "Pool address not found in URL", url.href);
       return { poolAddress: null, baseMint: null, quoteMint: null, cluster };
     }
 
@@ -672,7 +692,7 @@
     btn.style.top = "auto";
     btn.style.bottom = `${Math.max(0, ui.fallbackBottomPx + ui.offsetYPx)}px`;
     if (LAST_POSITION_MODE !== "fixed") {
-      console.debug(LOG_PREFIX, "Button fixed position", {
+      (void 0) && console.debug(LOG_PREFIX, "Button fixed position", {
         left: btn.style.left,
         bottom: btn.style.bottom
       });
@@ -684,6 +704,15 @@
   function getAnchorRect(el) {
     const r = el.getBoundingClientRect();
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+  }
+
+  function getPreferredPopupAnchorRect(fallbackEl) {
+    const floatingBtn = document.getElementById(BTN_ID);
+    if (floatingBtn instanceof HTMLElement) {
+      const rect = floatingBtn.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return getAnchorRect(floatingBtn);
+    }
+    return getAnchorRect(fallbackEl);
   }
 
   function ensureSwapButton() {
@@ -738,16 +767,127 @@
 
     btn.onclick = async () => {
       const context = await getPoolContext();
-      console.debug(LOG_PREFIX, "Pool context", context);
       await openAxiomPopup(context, { side: "sell", anchorRect: getAnchorRect(btn) });
     };
+  }
 
-    console.debug(LOG_PREFIX, "Injected Swap button");
+  function findWithdrawCloseAllButton() {
+    const buttons = Array.from(document.querySelectorAll("button"));
+    for (const btn of buttons) {
+      if (!(btn instanceof HTMLButtonElement)) continue;
+      const text = (btn.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+      if (text === "withdraw & close all") return btn;
+    }
+    return null;
+  }
+
+  function clickElement(el) {
+    el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  }
+
+  async function runWithdrawAndAxiomFlow(triggerBtn, withdrawBtn) {
+    if (triggerBtn.dataset.swapExtBusy === "1") return;
+    triggerBtn.dataset.swapExtBusy = "1";
+    const previousText = triggerBtn.textContent || "Exit to Axiom";
+    triggerBtn.textContent = "Processing...";
+    triggerBtn.disabled = true;
+
+    try {
+      const context = await getPoolContext();
+
+      if (withdrawBtn) {
+        clickElement(withdrawBtn);
+      } else {
+      }
+      // Use exactly the same open path as the regular sell button.
+      const mainBtn = document.getElementById(BTN_ID);
+      if (mainBtn instanceof HTMLButtonElement && mainBtn !== triggerBtn) {
+        mainBtn.click();
+      } else {
+        await openAxiomPopup(context, {
+          side: "sell",
+          anchorRect: getPreferredPopupAnchorRect(triggerBtn)
+        });
+      }
+      window.setTimeout(() => {
+        chrome.runtime.sendMessage({ type: TRIGGER_AUTO_SELL_ALL }, () => {
+          // no-op
+        });
+      }, 3000);
+    } catch (error) {
+    } finally {
+      window.setTimeout(() => {
+        triggerBtn.disabled = false;
+        triggerBtn.textContent = previousText;
+        triggerBtn.dataset.swapExtBusy = "0";
+      }, 1200);
+    }
+  }
+
+  function applyExitButtonInlineStyle(btn, template) {
+    btn.className = template.className;
+    btn.style.position = "";
+    btn.style.left = "";
+    btn.style.bottom = "";
+    btn.style.zIndex = "";
+    btn.style.height = "";
+    btn.style.padding = "";
+    btn.style.border = "";
+    btn.style.borderRadius = "";
+    btn.style.background = "";
+    btn.style.color = "";
+    btn.style.fontSize = "";
+    btn.style.fontWeight = "";
+    btn.style.cursor = "";
+    btn.style.display = "";
+    btn.style.alignItems = "";
+    btn.style.justifyContent = "";
+    btn.style.marginRight = "8px";
+    btn.style.whiteSpace = "nowrap";
+  }
+
+  function ensureWithdrawAxiomButton() {
+    const withdrawBtn = findWithdrawCloseAllButton();
+    const existing = document.getElementById(EXIT_BTN_ID);
+    if (!withdrawBtn) {
+      if (existing) existing.remove();
+      return;
+    }
+    const host = withdrawBtn && withdrawBtn.parentElement;
+    if (!host) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    if (existing instanceof HTMLButtonElement) {
+      if (existing.parentElement !== host) {
+        existing.remove();
+        host.insertBefore(existing, withdrawBtn);
+      }
+      applyExitButtonInlineStyle(existing, withdrawBtn);
+      existing.onclick = () => {
+        void runWithdrawAndAxiomFlow(existing, withdrawBtn);
+      };
+      return;
+    }
+
+    const btn = document.createElement("button");
+    btn.id = EXIT_BTN_ID;
+    btn.type = "button";
+    btn.textContent = "Exit to Axiom";
+    btn.title = "Withdraw and prepare Sell 100% on Axiom";
+    applyExitButtonInlineStyle(btn, withdrawBtn);
+    host.insertBefore(btn, withdrawBtn);
+    btn.onclick = () => {
+      void runWithdrawAndAxiomFlow(btn, withdrawBtn);
+    };
   }
 
   async function openFromPageSellButton(sourceButton) {
     const context = await getPoolContext();
-    console.debug(LOG_PREFIX, "Pool context (sell button)", context);
     if (sourceButton) {
       await openAxiomPopup(context, { side: "sell", anchorRect: getAnchorRect(sourceButton) });
       return;
@@ -769,16 +909,16 @@
       el.dataset.swapExtSellHooked = "1";
       el.addEventListener("click", () => {
         openFromPageSellButton(el).catch((error) => {
-          console.debug(LOG_PREFIX, "Sell button hook failed", error);
         });
       });
-      console.debug(LOG_PREFIX, "Hooked native Sell control");
     }
   }
 
   function cleanupForNonPoolPages() {
     const btn = document.getElementById(BTN_ID);
     if (btn) btn.remove();
+    const exitBtn = document.getElementById(EXIT_BTN_ID);
+    if (exitBtn) exitBtn.remove();
     isPositionLocked = false;
     closeOverlay();
   }
@@ -790,11 +930,8 @@
       return;
     }
     ensureSwapButton();
-    const now = Date.now();
-    if (now - lastSellWireAt > SELL_WIRE_INTERVAL_MS) {
-      wireNativeSellButtons();
-      lastSellWireAt = now;
-    }
+    ensureWithdrawAxiomButton();
+    // Disabled in test mode: native Sell hook causes duplicate popup opens/races.
   }
 
   function scheduleRouteCheck() {
@@ -847,7 +984,6 @@
   }
 
   function init() {
-    console.debug(LOG_PREFIX, "Initializing Meteora injector");
     patchHistoryForSpaNavigation();
     watchForAnchor();
   }

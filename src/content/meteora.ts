@@ -3,6 +3,7 @@ import { closeOverlay, openAxiomPopup } from "../ui/overlay";
 
 const LOG_PREFIX = "[SWAP-EXT]";
 const BTN_ID = "swap-ext-meteora-btn";
+const EXIT_BTN_ID = "swap-ext-withdraw-axiom-btn";
 const FLOAT_LEFT_PX = 24;
 const FLOAT_BOTTOM_PX = 31;
 const FLOAT_SIZE_PX = 42;
@@ -10,10 +11,18 @@ const BTN_GAP_PX = 15;
 const REPOSITION_INTERVAL_MS = 1200;
 const AXIOM_ICON_PATH = "icons/axiom-btn.png";
 const UI_CONFIG_KEY = "swapExtUi";
+const TRIGGER_AUTO_SELL_ALL = "swap-ext:trigger-auto-sell-all";
+const WITHDRAW_WAIT_TIMEOUT_MS = 90_000;
+const WITHDRAW_WAIT_POLL_MS = 750;
+const POST_WITHDRAW_SETTLE_MS = 1_500;
+const EXIT_SELL_RELAY_DURATION_MS = 2 * 60 * 1000;
+const EXIT_SELL_RELAY_INTERVAL_MS = 2_000;
 let LAST_POSITION_MODE: "fixed" | null = null;
 let isPositionLocked = false;
 let routeCheckTimer: number | null = null;
 let lastSellWireAt = 0;
+let exitSellRelayTimer: number | null = null;
+let exitSellRelayStopAt = 0;
 const ROUTE_CHECK_DEBOUNCE_MS = 400;
 const SELL_WIRE_INTERVAL_MS = 5000;
 
@@ -194,6 +203,15 @@ function getAnchorRect(el: HTMLElement): { left: number; top: number; right: num
   return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
 }
 
+function getPreferredPopupAnchorRect(fallbackEl: HTMLElement): { left: number; top: number; right: number; bottom: number } {
+  const floatingBtn = document.getElementById(BTN_ID);
+  if (floatingBtn instanceof HTMLElement) {
+    const rect = floatingBtn.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return getAnchorRect(floatingBtn);
+  }
+  return getAnchorRect(fallbackEl);
+}
+
 function ensureSwapButton(): void {
   const existing = document.getElementById(BTN_ID);
   if (existing instanceof HTMLButtonElement) {
@@ -254,6 +272,199 @@ function ensureSwapButton(): void {
   console.debug(LOG_PREFIX, "Injected Swap button");
 }
 
+function findWithdrawCloseAllButton(): HTMLButtonElement | null {
+  const buttons = Array.from(document.querySelectorAll("button"));
+  for (const btn of buttons) {
+    if (!(btn instanceof HTMLButtonElement)) continue;
+    const text = (btn.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (text === "withdraw & close all") return btn;
+  }
+  return null;
+}
+
+function clickElement(el: HTMLElement): void {
+  el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+}
+
+function getButtonState(btn: HTMLButtonElement): { text: string; disabled: boolean; className: string } {
+  return {
+    text: (btn.textContent || "").replace(/\s+/g, " ").trim().toLowerCase(),
+    disabled: btn.disabled || (btn.getAttribute("aria-disabled") || "").toLowerCase() === "true",
+    className: btn.className || ""
+  };
+}
+
+function hasWithdrawStateChanged(
+  baseline: { text: string; disabled: boolean; className: string },
+  current: { text: string; disabled: boolean; className: string }
+): boolean {
+  if (current.disabled && !baseline.disabled) return true;
+  if (current.text !== baseline.text) return true;
+  if (current.className !== baseline.className) return true;
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function waitForWithdrawProgress(withdrawBtn: HTMLButtonElement): Promise<boolean> {
+  const baseline = getButtonState(withdrawBtn);
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < WITHDRAW_WAIT_TIMEOUT_MS) {
+    const currentBtn = findWithdrawCloseAllButton();
+    if (!currentBtn) return true;
+    const current = getButtonState(currentBtn);
+    if (hasWithdrawStateChanged(baseline, current)) return true;
+    await sleep(WITHDRAW_WAIT_POLL_MS);
+  }
+
+  return false;
+}
+
+function stopExitSellRelay(): void {
+  if (exitSellRelayTimer !== null) {
+    window.clearTimeout(exitSellRelayTimer);
+    exitSellRelayTimer = null;
+  }
+  exitSellRelayStopAt = 0;
+}
+
+function sendExitSellTrigger(): void {
+  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return;
+  chrome.runtime.sendMessage({ type: TRIGGER_AUTO_SELL_ALL }, () => {
+    // no-op
+  });
+}
+
+function startExitSellRelay(): void {
+  stopExitSellRelay();
+  exitSellRelayStopAt = Date.now() + EXIT_SELL_RELAY_DURATION_MS;
+
+  const tick = (): void => {
+    if (Date.now() >= exitSellRelayStopAt) {
+      stopExitSellRelay();
+      return;
+    }
+    sendExitSellTrigger();
+    exitSellRelayTimer = window.setTimeout(tick, EXIT_SELL_RELAY_INTERVAL_MS);
+  };
+
+  sendExitSellTrigger();
+  exitSellRelayTimer = window.setTimeout(tick, EXIT_SELL_RELAY_INTERVAL_MS);
+}
+
+async function runWithdrawAndAxiomFlow(triggerBtn: HTMLButtonElement, withdrawBtn: HTMLButtonElement | null): Promise<void> {
+  if (triggerBtn.dataset.swapExtBusy === "1") return;
+  triggerBtn.dataset.swapExtBusy = "1";
+  const previousText = triggerBtn.textContent || "Exit to Axiom";
+  triggerBtn.textContent = "Processing...";
+  triggerBtn.disabled = true;
+
+  try {
+    const context = await getPoolContext();
+    console.debug(LOG_PREFIX, "Pool context (withdraw flow)", context);
+
+    let withdrawProgressed = false;
+    if (withdrawBtn) {
+      clickElement(withdrawBtn);
+      console.debug(LOG_PREFIX, "Triggered Withdraw & Close All");
+      withdrawProgressed = await waitForWithdrawProgress(withdrawBtn);
+      if (withdrawProgressed) {
+        await sleep(POST_WITHDRAW_SETTLE_MS);
+      } else {
+        console.debug(LOG_PREFIX, "Withdraw confirmation wait timed out, continuing with sell relay");
+      }
+    } else {
+      console.debug(LOG_PREFIX, "Withdraw button not found, running Axiom-only exit flow");
+    }
+    // Use exactly the same open path as the regular sell button.
+    const mainBtn = document.getElementById(BTN_ID);
+    if (mainBtn instanceof HTMLButtonElement && mainBtn !== triggerBtn) {
+      mainBtn.click();
+    } else {
+      await openAxiomPopup(context, {
+        side: "sell",
+        anchorRect: getPreferredPopupAnchorRect(triggerBtn)
+      });
+    }
+    startExitSellRelay();
+
+  } catch (error) {
+    console.debug(LOG_PREFIX, "Withdraw -> Axiom flow failed", error);
+  } finally {
+    window.setTimeout(() => {
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = previousText;
+      triggerBtn.dataset.swapExtBusy = "0";
+    }, 1200);
+  }
+}
+
+function applyExitButtonInlineStyle(btn: HTMLButtonElement, template: HTMLButtonElement): void {
+  btn.className = template.className;
+  btn.style.position = "";
+  btn.style.left = "";
+  btn.style.bottom = "";
+  btn.style.zIndex = "";
+  btn.style.height = "";
+  btn.style.padding = "";
+  btn.style.border = "";
+  btn.style.borderRadius = "";
+  btn.style.background = "";
+  btn.style.color = "";
+  btn.style.fontSize = "";
+  btn.style.fontWeight = "";
+  btn.style.cursor = "";
+  btn.style.display = "";
+  btn.style.alignItems = "";
+  btn.style.justifyContent = "";
+  btn.style.marginRight = "8px";
+  btn.style.whiteSpace = "nowrap";
+}
+
+function ensureWithdrawAxiomButton(): void {
+  const withdrawBtn = findWithdrawCloseAllButton();
+  const existing = document.getElementById(EXIT_BTN_ID);
+  if (!withdrawBtn) {
+    if (existing) existing.remove();
+    return;
+  }
+  const host = withdrawBtn.parentElement;
+  if (!host) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  if (existing instanceof HTMLButtonElement) {
+    if (existing.parentElement !== host) {
+      existing.remove();
+      host.insertBefore(existing, withdrawBtn);
+    }
+    applyExitButtonInlineStyle(existing, withdrawBtn);
+    existing.onclick = () => {
+      void runWithdrawAndAxiomFlow(existing, withdrawBtn);
+    };
+    return;
+  }
+
+  const btn = document.createElement("button");
+  btn.id = EXIT_BTN_ID;
+  btn.type = "button";
+  btn.textContent = "Exit to Axiom";
+  btn.title = "Withdraw and prepare Sell 100% on Axiom";
+  applyExitButtonInlineStyle(btn, withdrawBtn);
+  host.insertBefore(btn, withdrawBtn);
+  btn.onclick = () => {
+    void runWithdrawAndAxiomFlow(btn, withdrawBtn);
+  };
+  console.debug(LOG_PREFIX, "Injected Withdraw + Axiom button");
+}
+
 async function openFromPageSellButton(sourceButton?: HTMLElement): Promise<void> {
   const context = await getPoolContext();
   console.debug(LOG_PREFIX, "Pool context (sell button)", context);
@@ -288,6 +499,8 @@ function wireNativeSellButtons(): void {
 function cleanupForNonPoolPages(): void {
   const btn = document.getElementById(BTN_ID);
   if (btn) btn.remove();
+  const exitBtn = document.getElementById(EXIT_BTN_ID);
+  if (exitBtn) exitBtn.remove();
   isPositionLocked = false;
   closeOverlay();
 }
@@ -299,11 +512,8 @@ function onRouteMaybeChanged(): void {
     return;
   }
   ensureSwapButton();
-  const now = Date.now();
-  if (now - lastSellWireAt > SELL_WIRE_INTERVAL_MS) {
-    wireNativeSellButtons();
-    lastSellWireAt = now;
-  }
+  ensureWithdrawAxiomButton();
+  // Disabled in test mode: native Sell hook causes duplicate popup opens/races.
 }
 
 function scheduleRouteCheck(): void {

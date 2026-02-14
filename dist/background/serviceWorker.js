@@ -1,7 +1,12 @@
 const LOG_PREFIX = "[SWAP-EXT]";
 const OPEN_AXIOM_POPUP = "swap-ext:open-axiom-popup";
+const RUN_AUTO_SELL_ALL = "swap-ext:run-auto-sell-all";
+const TRIGGER_AUTO_SELL_ALL = "swap-ext:trigger-auto-sell-all";
+const AXIOM_AUTO_SELL_REQUEST_KEY = "swapExtAxiomAutoSellRequest";
 const POPUP_WIDTH = 420;
 const POPUP_HEIGHT = 720;
+const AUTO_SELL_RETRIES = 12;
+const AUTO_SELL_RETRY_MS = 500;
 const AXIOM_WINDOW_ID_KEY = "axiomPopupWindowId";
 const AXIOM_POOL_KEY = "axiomPopupPoolAddress";
 let axiomPopupWindowId = null;
@@ -39,6 +44,70 @@ function isSellUrl(url) {
     return false;
   }
 }
+
+function sendAutoSellAllToTab(tabId, attempt = 0) {
+  chrome.tabs.sendMessage(tabId, { type: RUN_AUTO_SELL_ALL }, () => {
+    if (!chrome.runtime.lastError) {
+      clearAutoSellAllRequest();
+      return;
+    }
+    if (attempt >= AUTO_SELL_RETRIES) return;
+    setTimeout(() => sendAutoSellAllToTab(tabId, attempt + 1), AUTO_SELL_RETRY_MS);
+  });
+}
+
+function markAutoSellAllRequest() {
+  if (!chrome.storage || !chrome.storage.local) return;
+  chrome.storage.local.set({
+    [AXIOM_AUTO_SELL_REQUEST_KEY]: {
+      ts: Date.now()
+    }
+  });
+}
+
+function clearAutoSellAllRequest() {
+  if (!chrome.storage || !chrome.storage.local) return;
+  chrome.storage.local.remove([AXIOM_AUTO_SELL_REQUEST_KEY]);
+}
+
+function readAutoSellAllRequest(callback) {
+  if (!chrome.storage || !chrome.storage.local) {
+    callback(false);
+    return;
+  }
+  chrome.storage.local.get([AXIOM_AUTO_SELL_REQUEST_KEY], (result) => {
+    if (chrome.runtime.lastError) {
+      callback(false);
+      return;
+    }
+    const payload = result && result[AXIOM_AUTO_SELL_REQUEST_KEY];
+    const ts = Number((payload && payload.ts) || 0);
+    callback(ts > 0 && Date.now() - ts <= 2 * 60 * 1000);
+  });
+}
+
+function triggerAutoSellAll(windowId, tabId) {
+  markAutoSellAllRequest();
+  if (typeof tabId === "number") {
+    sendAutoSellAllToTab(tabId);
+    return;
+  }
+  chrome.tabs.query({ windowId }, (tabs) => {
+    if (chrome.runtime.lastError || !Array.isArray(tabs)) return;
+    const axiomTab = tabs.find((t) => isAxiomUrl(t.url) && typeof t.id === "number");
+    if (!axiomTab || !axiomTab.id) return;
+    sendAutoSellAllToTab(axiomTab.id);
+  });
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  if (!isAxiomUrl(tab.url)) return;
+  readAutoSellAllRequest((isFresh) => {
+    if (!isFresh) return;
+    sendAutoSellAllToTab(tabId);
+  });
+});
 
 function readStoredWindowId() {
   return new Promise((resolve) => {
@@ -94,7 +163,6 @@ function findExistingAxiomWindow() {
         return;
       }
 
-      let fallbackId = null;
       for (const w of windows) {
         const hasAxiomTab = (w.tabs || []).some((t) => isAxiomUrl(t.url));
         if (!hasAxiomTab || !w.id) continue;
@@ -102,10 +170,9 @@ function findExistingAxiomWindow() {
           resolve(w.id);
           return;
         }
-        fallbackId = fallbackId || w.id;
       }
 
-      resolve(fallbackId);
+      resolve(null);
     });
   });
 }
@@ -121,10 +188,30 @@ chrome.windows.onRemoved.addListener((windowId) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const msg = message;
+  if (msg && msg.type === TRIGGER_AUTO_SELL_ALL) {
+    const tryTrigger = async () => {
+      if (axiomPopupWindowId == null) {
+        axiomPopupWindowId = await readStoredWindowId();
+      }
+      if (axiomPopupWindowId != null) {
+        triggerAutoSellAll(axiomPopupWindowId);
+        sendResponse({ ok: true });
+        return;
+      }
+      sendResponse({ ok: false, error: "Axiom popup not found" });
+    };
+    void tryTrigger();
+    return true;
+  }
   if (!msg || msg.type !== OPEN_AXIOM_POPUP) return;
 
   const url = msg.payload && msg.payload.url;
   const requestedPoolAddress = (msg.payload && msg.payload.poolAddress) || null;
+  const requestAutoSellAll = !!(msg.payload && msg.payload.autoSellAll);
+  const forceReload = !!(msg.payload && msg.payload.forceReload);
+  if (!requestAutoSellAll) {
+    clearAutoSellAllRequest();
+  }
   if (!isAxiomUrl(url)) {
     sendResponse({ ok: false, error: "Invalid or missing Axiom URL" });
     return;
@@ -153,7 +240,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         axiomPopupPoolAddress = requestedPoolAddress;
         void writeStoredWindowId(createdWindow.id);
         void writeStoredPoolAddress(requestedPoolAddress);
-        console.debug(LOG_PREFIX, "Opened Axiom popup", {
+        if (requestAutoSellAll) {
+          triggerAutoSellAll(createdWindow.id);
+        }
+        (void 0) && console.debug(LOG_PREFIX, "Opened Axiom popup", {
           url,
           windowId: createdWindow.id,
           left: createdWindow.left,
@@ -187,7 +277,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.windows.get(axiomPopupWindowId, { populate: true }, (existingWindow) => {
       if (chrome.runtime.lastError || !existingWindow || !existingWindow.id) {
         axiomPopupWindowId = null;
+        axiomPopupPoolAddress = null;
         void writeStoredWindowId(null);
+        void writeStoredPoolAddress(null);
+        openWindow(left, top);
+        return;
+      }
+
+      if (existingWindow.type !== "popup") {
+        axiomPopupWindowId = null;
+        axiomPopupPoolAddress = null;
+        void writeStoredWindowId(null);
+        void writeStoredPoolAddress(null);
         openWindow(left, top);
         return;
       }
@@ -207,10 +308,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const currentRouteKey = getAxiomRouteKey(currentTab && currentTab.url);
       const shouldForceSellUpdate = isSellUrl(url) && !isSellUrl(currentTab && currentTab.url);
       const sameRequestedPool = !!requestedPoolAddress && requestedPoolAddress === axiomPopupPoolAddress;
-      const shouldUpdateUrl = !sameRequestedPool && (targetRouteKey !== currentRouteKey || shouldForceSellUpdate);
+      const shouldUpdateUrl = forceReload || targetRouteKey !== currentRouteKey || shouldForceSellUpdate;
 
       if (currentTab && currentTab.id && shouldUpdateUrl) {
-        chrome.tabs.update(currentTab.id, { url }, () => {
+        chrome.tabs.update(currentTab.id, { url, active: true }, () => {
           if (chrome.runtime.lastError) {
             axiomPopupWindowId = null;
             void writeStoredWindowId(null);
@@ -225,12 +326,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               openWindow(left, top);
               return;
             }
-            console.debug(LOG_PREFIX, "Focused existing Axiom popup (updated URL)", {
+            (void 0) && console.debug(LOG_PREFIX, "Focused existing Axiom popup (updated URL)", {
               windowId: existingWindow.id,
               url
             });
-            axiomPopupPoolAddress = requestedPoolAddress;
-            void writeStoredPoolAddress(requestedPoolAddress);
+            if (!sameRequestedPool) {
+              axiomPopupPoolAddress = requestedPoolAddress;
+              void writeStoredPoolAddress(requestedPoolAddress);
+            }
+            if (requestAutoSellAll && currentTab.id) {
+              triggerAutoSellAll(existingWindow.id, currentTab.id);
+            }
+            sendResponse({ ok: true });
+          });
+        });
+        return;
+      }
+
+      if (currentTab && currentTab.id) {
+        chrome.tabs.update(currentTab.id, { active: true }, () => {
+          chrome.windows.update(existingWindow.id, { focused: true }, () => {
+            if (chrome.runtime.lastError) {
+              axiomPopupWindowId = null;
+              void writeStoredWindowId(null);
+              openWindow(left, top);
+              return;
+            }
+            (void 0) && console.debug(LOG_PREFIX, "Focused existing Axiom popup (no reload)", {
+              windowId: existingWindow.id
+            });
+            if (requestAutoSellAll && currentTab.id) {
+              triggerAutoSellAll(existingWindow.id, currentTab.id);
+            }
             sendResponse({ ok: true });
           });
         });
@@ -244,9 +371,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           openWindow(left, top);
           return;
         }
-        console.debug(LOG_PREFIX, "Focused existing Axiom popup (no reload)", {
+        (void 0) && console.debug(LOG_PREFIX, "Focused existing Axiom popup (no reload)", {
           windowId: existingWindow.id
         });
+        if (requestAutoSellAll) {
+          triggerAutoSellAll(existingWindow.id);
+        }
         sendResponse({ ok: true });
       });
     });

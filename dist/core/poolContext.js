@@ -106,7 +106,6 @@ export async function getPoolContext() {
   const cluster = parseCluster(url);
 
   if (!poolAddress) {
-    console.debug(LOG_PREFIX, "Pool address not found in URL", url.href);
     return { poolAddress: null, baseMint: null, quoteMint: null, cluster };
   }
 
