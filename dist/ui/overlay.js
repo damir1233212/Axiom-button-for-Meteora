@@ -5,7 +5,7 @@ const AXIOM_REF_SEGMENT = "@112233444";
 const DEXSCREENER_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens/";
 const GECKO_TERMINAL_TOKEN_POOLS_API = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/";
 const PAIR_CACHE_KEY = "axiomPairCache";
-const PAIR_CACHE_TTL_MS = 10 * 60 * 1000;
+const PAIR_CACHE_TTL_MS = 2 * 60 * 1000;
 const FLOAT_LEFT_PX = 24;
 const FLOAT_BOTTOM_PX = 24;
 const FLOAT_SIZE_PX = 56;
@@ -190,7 +190,15 @@ async function resolveBestPairAddress(tokenMint) {
 export async function buildAxiomUrl(context) {
   const side = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : "buy";
   const mint = chooseAxiomMint(context);
-  if (!mint) return "https://axiom.trade/?chain=sol";
+  if (!mint) {
+    const fallbackResource =
+      context.poolAddress && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(context.poolAddress) ? context.poolAddress : null;
+    if (!fallbackResource) return "https://axiom.trade/?chain=sol";
+    const fallbackUrl = new URL(`${AXIOM_BASE_URL}${fallbackResource}`);
+    fallbackUrl.pathname = `${fallbackUrl.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+    fallbackUrl.searchParams.set("chain", "sol");
+    return fallbackUrl.toString();
+  }
 
   const pairAddress = await resolveBestPairAddress(mint);
   const resource = pairAddress || mint;
@@ -306,7 +314,7 @@ export async function openAxiomPopup(context) {
       chrome.runtime.sendMessage(
         {
           type: "swap-ext:open-axiom-popup",
-          payload: { url, left: pos.left, top: pos.top }
+          payload: { url, left: pos.left, top: pos.top, poolAddress: context.poolAddress || undefined }
         },
         (res) => {
           if (chrome.runtime.lastError) {

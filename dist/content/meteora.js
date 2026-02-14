@@ -3,15 +3,15 @@
   const BTN_ID = "swap-ext-meteora-btn";
   const ROOT_ID = "swap-ext-overlay-root";
   const FLOAT_LEFT_PX = 24;
-  const FLOAT_BOTTOM_PX = 24;
-  const FLOAT_SIZE_PX = 56;
+  const FLOAT_BOTTOM_PX = 31;
+  const FLOAT_SIZE_PX = 42;
   const BTN_GAP_PX = 15;
   const REPOSITION_INTERVAL_MS = 1200;
   const PANEL_GAP_PX = 15;
   const AXIOM_ICON_PATH = "icons/axiom-btn.png";
   const UI_CONFIG_KEY = "swapExtUi";
   let LAST_POSITION_MODE = null;
-  let hasEverAnchoredToJupiter = false;
+  let isPositionLocked = false;
   let routeCheckTimer = null;
   let lastSellWireAt = 0;
   const ROUTE_CHECK_DEBOUNCE_MS = 400;
@@ -64,7 +64,7 @@
   const DEXSCREENER_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens/";
   const GECKO_TERMINAL_TOKEN_POOLS_API = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/";
   const PAIR_CACHE_KEY = "axiomPairCache";
-  const PAIR_CACHE_TTL_MS = 10 * 60 * 1000;
+  const PAIR_CACHE_TTL_MS = 2 * 60 * 1000;
   const AXIOM_PREFERRED_DEXES = new Set(["pumpswap", "raydium", "meteora", "orca", "pumpfun"]);
 
   function storageGet(key) {
@@ -248,7 +248,15 @@
   async function buildAxiomUrl(context) {
     const side = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : "buy";
     const mint = chooseAxiomMint(context);
-    if (!mint) return "https://axiom.trade/?chain=sol";
+    if (!mint) {
+      const fallbackResource =
+        context.poolAddress && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(context.poolAddress) ? context.poolAddress : null;
+      if (!fallbackResource) return "https://axiom.trade/?chain=sol";
+      const fallbackUrl = new URL(`${AXIOM_BASE_URL}${fallbackResource}`);
+      fallbackUrl.pathname = `${fallbackUrl.pathname.replace(/\/$/, "")}/${AXIOM_REF_SEGMENT}`;
+      fallbackUrl.searchParams.set("chain", "sol");
+      return fallbackUrl.toString();
+    }
 
     const pairAddress = await resolveBestPairAddress(mint);
     const resource = pairAddress || mint;
@@ -361,10 +369,10 @@
     try {
       const response = await new Promise((resolve) => {
         chrome.runtime.sendMessage(
-          {
-            type: "swap-ext:open-axiom-popup",
-            payload: { url, left: pos.left, top: pos.top }
-          },
+        {
+          type: "swap-ext:open-axiom-popup",
+          payload: { url, left: pos.left, top: pos.top, poolAddress: context.poolAddress || undefined }
+        },
           (res) => {
             if (chrome.runtime.lastError) {
               resolve({ ok: false, error: chrome.runtime.lastError.message });
@@ -386,9 +394,12 @@
 
   function parsePoolAddressFromUrl(url) {
     const parts = url.pathname.split("/").filter(Boolean);
-    const dlmmIndex = parts.findIndex((p) => p.toLowerCase() === "dlmm");
-    if (dlmmIndex === -1) return null;
-    return parts[dlmmIndex + 1] || null;
+    const poolIndex = parts.findIndex((p) => {
+      const v = p.toLowerCase();
+      return v === "dlmm" || v === "dammv2";
+    });
+    if (poolIndex === -1) return null;
+    return parts[poolIndex + 1] || null;
   }
 
   function parseCluster(url) {
@@ -556,8 +567,8 @@
     return { poolAddress, baseMint: null, quoteMint: null, cluster };
   }
 
-  function isDlmmPoolUrl(url) {
-    return /\/dlmm\/[^/?#]+/i.test(url.pathname);
+  function isSupportedPoolUrl(url) {
+    return /\/(dlmm|dammv2)\/[^/?#]+/i.test(url.pathname);
   }
 
   const SHADOW_RESCAN_MS = 5000;
@@ -608,6 +619,15 @@
   }
 
   function findJupiterRoot() {
+    const branded =
+      findInAllRoots("img[alt='Jupiter aggregator']") ||
+      findInAllRoots("img[src*='jup.ag/svg/jupiter-logo.svg']") ||
+      findInAllRoots("img[src*='jupiter-logo.svg']");
+    if (branded instanceof HTMLElement) {
+      const viaBrand = branded.closest("div.fixed.bottom-6.left-6");
+      if (viaBrand instanceof HTMLElement) return viaBrand;
+    }
+
     const fixedRoot = findInAllRoots("div.fixed.bottom-6.left-6");
     return fixedRoot instanceof HTMLElement ? fixedRoot : null;
   }
@@ -635,72 +655,30 @@
       const rect = primaryBtn.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) return rect;
     }
-
-    const fixedRoot = findInAllRoots("div.fixed.bottom-6.left-6");
-    if (fixedRoot instanceof HTMLElement) {
-      const primary = fixedRoot.querySelector(":scope > div.h-14.w-14") || fixedRoot.firstElementChild || fixedRoot;
-      if (primary instanceof HTMLElement) {
-        const rect = primary.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) return rect;
-      }
-    }
-
-    const branded =
-      findInAllRoots("img[alt='Jupiter aggregator']") ||
-      findInAllRoots("img[src*='jup.ag/svg/jupiter-logo.svg']") ||
-      findInAllRoots("img[src*='jupiter-logo.svg']");
-    if (branded instanceof HTMLElement) {
-      const clickable = branded.closest("button, [role='button'], div.h-14.w-14, .h-14.w-14, .fixed.bottom-6.left-6");
-      if (clickable instanceof HTMLElement) {
-        const rect = clickable.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) return rect;
-      }
-    }
-
-    const fallback = findInAllRoots("div.h-14.w-14.rounded-full.bg-black");
-    if (fallback instanceof HTMLElement) {
-      const rect = fallback.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) return rect;
-    }
+    // Do not use broad logo-based fallbacks here, they can match inner plugin elements
+    // and produce inconsistent size/position across tabs.
     return null;
   }
 
   function applyFloatingButtonPosition(btn) {
+    if (isPositionLocked) return;
     const ui = getUiConfig();
-    const jupRect = findJupiterButtonRect();
-    if (jupRect) {
-      hasEverAnchoredToJupiter = true;
-      if (btn.parentElement !== document.body) document.body.appendChild(btn);
-      const effectiveSize = ui.matchJupSize ? Math.round(jupRect.height) : ui.sizePx;
-      btn.style.position = "fixed";
-      btn.style.width = `${effectiveSize}px`;
-      btn.style.height = `${effectiveSize}px`;
-      btn.style.left = `${Math.round(jupRect.right + ui.gapPx)}px`;
-      btn.style.bottom = `${Math.round(window.innerHeight - jupRect.bottom + (jupRect.height - effectiveSize) / 2 - ui.offsetYPx)}px`;
-      btn.style.top = "auto";
-      if (LAST_POSITION_MODE !== "jupiter") {
-        console.debug(LOG_PREFIX, "Button anchored next to Jupiter", {
-          left: btn.style.left,
-          bottom: btn.style.bottom
-        });
-        LAST_POSITION_MODE = "jupiter";
-      }
-      return;
-    }
-
-    if (hasEverAnchoredToJupiter) {
-      return;
-    }
-
+    btn.style.visibility = "visible";
     if (btn.parentElement !== document.body) document.body.appendChild(btn);
     btn.style.position = "fixed";
+    btn.style.width = `${ui.sizePx}px`;
+    btn.style.height = `${ui.sizePx}px`;
     btn.style.left = `${ui.fallbackLeftPx}px`;
     btn.style.top = "auto";
-    btn.style.bottom = `${ui.fallbackBottomPx}px`;
-    if (LAST_POSITION_MODE !== "fallback") {
-      console.debug(LOG_PREFIX, "Button using fallback position");
-      LAST_POSITION_MODE = "fallback";
+    btn.style.bottom = `${Math.max(0, ui.fallbackBottomPx + ui.offsetYPx)}px`;
+    if (LAST_POSITION_MODE !== "fixed") {
+      console.debug(LOG_PREFIX, "Button fixed position", {
+        left: btn.style.left,
+        bottom: btn.style.bottom
+      });
+      LAST_POSITION_MODE = "fixed";
     }
+    isPositionLocked = true;
   }
 
   function getAnchorRect(el) {
@@ -801,12 +779,13 @@
   function cleanupForNonPoolPages() {
     const btn = document.getElementById(BTN_ID);
     if (btn) btn.remove();
+    isPositionLocked = false;
     closeOverlay();
   }
 
   function onRouteMaybeChanged() {
     const url = new URL(window.location.href);
-    if (!isDlmmPoolUrl(url)) {
+    if (!isSupportedPoolUrl(url)) {
       cleanupForNonPoolPages();
       return;
     }

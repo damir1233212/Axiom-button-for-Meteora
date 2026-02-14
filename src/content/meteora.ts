@@ -4,14 +4,14 @@ import { closeOverlay, openAxiomPopup } from "../ui/overlay";
 const LOG_PREFIX = "[SWAP-EXT]";
 const BTN_ID = "swap-ext-meteora-btn";
 const FLOAT_LEFT_PX = 24;
-const FLOAT_BOTTOM_PX = 24;
-const FLOAT_SIZE_PX = 56;
+const FLOAT_BOTTOM_PX = 31;
+const FLOAT_SIZE_PX = 42;
 const BTN_GAP_PX = 15;
 const REPOSITION_INTERVAL_MS = 1200;
 const AXIOM_ICON_PATH = "icons/axiom-btn.png";
 const UI_CONFIG_KEY = "swapExtUi";
-let LAST_POSITION_MODE: "jupiter-container" | "jupiter-rect" | "fallback" | null = null;
-let hasEverAnchoredToJupiter = false;
+let LAST_POSITION_MODE: "fixed" | null = null;
+let isPositionLocked = false;
 let routeCheckTimer: number | null = null;
 let lastSellWireAt = 0;
 const ROUTE_CHECK_DEBOUNCE_MS = 400;
@@ -67,8 +67,8 @@ function getAxiomIconUrl(): string {
   return AXIOM_ICON_PATH;
 }
 
-function isDlmmPoolUrl(url: URL): boolean {
-  return /\/dlmm\/[^/?#]+/i.test(url.pathname);
+function isSupportedPoolUrl(url: URL): boolean {
+  return /\/(dlmm|dammv2)\/[^/?#]+/i.test(url.pathname);
 }
 
 const SHADOW_RESCAN_MS = 5000;
@@ -125,6 +125,15 @@ function resolveAnchor(): HTMLElement | null {
 }
 
 function findJupiterRoot(): HTMLElement | null {
+  const branded =
+    findInAllRoots("img[alt='Jupiter aggregator']") ||
+    findInAllRoots("img[src*='jup.ag/svg/jupiter-logo.svg']") ||
+    findInAllRoots("img[src*='jupiter-logo.svg']");
+  if (branded instanceof HTMLElement) {
+    const viaBrand = branded.closest("div.fixed.bottom-6.left-6");
+    if (viaBrand instanceof HTMLElement) return viaBrand;
+  }
+
   const fixedRoot = findInAllRoots("div.fixed.bottom-6.left-6");
   return fixedRoot instanceof HTMLElement ? fixedRoot : null;
 }
@@ -154,72 +163,30 @@ function findJupiterButtonRect(): DOMRect | null {
     if (rect.width > 0 && rect.height > 0) return rect;
   }
 
-  const fixedRoot = findInAllRoots("div.fixed.bottom-6.left-6");
-  if (fixedRoot instanceof HTMLElement) {
-    const primary = fixedRoot.querySelector(":scope > div.h-14.w-14") || fixedRoot.firstElementChild || fixedRoot;
-    if (primary instanceof HTMLElement) {
-      const rect = primary.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) return rect;
-    }
-  }
-
-  const branded =
-    findInAllRoots("img[alt='Jupiter aggregator']") ||
-    findInAllRoots("img[src*='jup.ag/svg/jupiter-logo.svg']") ||
-    findInAllRoots("img[src*='jupiter-logo.svg']");
-  if (branded instanceof HTMLElement) {
-    const clickable = branded.closest("button, [role='button'], div.h-14.w-14, .h-14.w-14, .fixed.bottom-6.left-6");
-    if (clickable instanceof HTMLElement) {
-      const rect = clickable.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) return rect;
-    }
-  }
-
-  const fallback = findInAllRoots("div.h-14.w-14.rounded-full.bg-black");
-  if (fallback instanceof HTMLElement) {
-    const rect = fallback.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) return rect;
-  }
+  // Do not use broad logo-based fallbacks here, they can match inner plugin elements
+  // and produce inconsistent size/position across tabs.
   return null;
 }
 
 function applyFloatingButtonPosition(btn: HTMLButtonElement): void {
-  const now = Date.now();
+  if (isPositionLocked) return;
   const ui = getUiConfig();
-  const jupRect = findJupiterButtonRect();
-  if (jupRect) {
-    hasEverAnchoredToJupiter = true;
-    if (btn.parentElement !== document.body) document.body.appendChild(btn);
-    const effectiveSize = ui.matchJupSize ? Math.round(jupRect.height) : ui.sizePx;
-    btn.style.position = "fixed";
-    btn.style.width = `${effectiveSize}px`;
-    btn.style.height = `${effectiveSize}px`;
-    btn.style.left = `${Math.round(jupRect.right + ui.gapPx)}px`;
-    btn.style.bottom = `${Math.round(window.innerHeight - jupRect.bottom + (jupRect.height - effectiveSize) / 2 - ui.offsetYPx)}px`;
-    btn.style.top = "auto";
-    if (LAST_POSITION_MODE !== "jupiter") {
-      console.debug(LOG_PREFIX, "Button anchored next to Jupiter", {
-        left: btn.style.left,
-        bottom: btn.style.bottom
-      });
-      LAST_POSITION_MODE = "jupiter";
-    }
-    return;
-  }
-
-  if (hasEverAnchoredToJupiter) {
-    return;
-  }
-
+  btn.style.visibility = "visible";
   if (btn.parentElement !== document.body) document.body.appendChild(btn);
   btn.style.position = "fixed";
+  btn.style.width = `${ui.sizePx}px`;
+  btn.style.height = `${ui.sizePx}px`;
   btn.style.left = `${ui.fallbackLeftPx}px`;
   btn.style.top = "auto";
-  btn.style.bottom = `${ui.fallbackBottomPx}px`;
-  if (LAST_POSITION_MODE !== "fallback") {
-    console.debug(LOG_PREFIX, "Button using fallback position");
-    LAST_POSITION_MODE = "fallback";
+  btn.style.bottom = `${Math.max(0, ui.fallbackBottomPx + ui.offsetYPx)}px`;
+  if (LAST_POSITION_MODE !== "fixed") {
+    console.debug(LOG_PREFIX, "Button fixed position", {
+      left: btn.style.left,
+      bottom: btn.style.bottom
+    });
+    LAST_POSITION_MODE = "fixed";
   }
+  isPositionLocked = true;
 }
 
 function getAnchorRect(el: HTMLElement): { left: number; top: number; right: number; bottom: number } {
@@ -321,12 +288,13 @@ function wireNativeSellButtons(): void {
 function cleanupForNonPoolPages(): void {
   const btn = document.getElementById(BTN_ID);
   if (btn) btn.remove();
+  isPositionLocked = false;
   closeOverlay();
 }
 
 function onRouteMaybeChanged(): void {
   const url = new URL(window.location.href);
-  if (!isDlmmPoolUrl(url)) {
+  if (!isSupportedPoolUrl(url)) {
     cleanupForNonPoolPages();
     return;
   }

@@ -25,9 +25,12 @@ interface PoolContextCacheStore {
 
 function parsePoolAddressFromUrl(url: URL): string | null {
   const parts = url.pathname.split("/").filter(Boolean);
-  const dlmmIndex = parts.findIndex((p) => p.toLowerCase() === "dlmm");
-  if (dlmmIndex === -1) return null;
-  return parts[dlmmIndex + 1] ?? null;
+  const poolIndex = parts.findIndex((p) => {
+    const v = p.toLowerCase();
+    return v === "dlmm" || v === "dammv2";
+  });
+  if (poolIndex === -1) return null;
+  return parts[poolIndex + 1] ?? null;
 }
 
 function parseCluster(url: URL): Cluster {

@@ -22,6 +22,16 @@
   }
 
   function findSellControl() {
+    const classBasedCandidates = Array.from(
+      document.querySelectorAll("div.group.flex.h-\\[26px\\].rounded-full.px-\\[12px\\], div.group.rounded-full")
+    );
+    for (const node of classBasedCandidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      const label = (node.textContent || "").trim().toLowerCase();
+      if (label !== "sell") continue;
+      if (isVisible(node)) return node;
+    }
+
     const candidates = Array.from(document.querySelectorAll("button, [role='button'], [role='tab'], div, span, a"));
     for (const node of candidates) {
       if (!(node instanceof HTMLElement)) continue;
