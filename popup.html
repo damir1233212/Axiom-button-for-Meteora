@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Axiom Links</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="topbar">
+      <div class="title-wrap">
+        <span class="title">Axiom Quick Links</span>
+      </div>
+      <button id="settings-toggle" class="icon-btn" type="button" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M19.14 12.94a7.43 7.43 0 0 0 .05-.94 7.43 7.43 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.16 7.16 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.49-.42h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.43 7.43 0 0 0-.05.94 7.43 7.43 0 0 0 .05.94L2.82 14.52a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.84a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z" />
+        </svg>
+      </button>
+    </header>
+
+    <button class="link-btn" data-url="https://axiom.trade/portfolio">Portfolio</button>
+    <button class="link-btn" data-url="https://axiom.trade/discover">Discover</button>
+    <div class="tg-wrap">
+      <button class="tg-btn" data-url="https://t.me/still_in_beta" aria-label="Updates Telegram channel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9.82 15.52 9.44 20.9c.54 0 .78-.23 1.07-.51l2.58-2.47 5.35 3.92c.98.54 1.67.26 1.94-.9l3.52-16.48h0c.33-1.54-.56-2.15-1.52-1.79L1.64 10.6C.13 11.18.16 12.03 1.38 12.4l5.31 1.66L19.03 6.2c.58-.38 1.1-.17.67.22" />
+        </svg>
+      </button>
+      <span class="tg-label">updates</span>
+    </div>
+
+    <section id="settings-panel" class="settings hidden">
+      <div class="settings-title">Meteora Settings</div>
+      <label class="setting-row">
+        <input id="dup-enabled" type="checkbox" />
+        <span>Duplicate external links in the top panel</span>
+      </label>
+      <div id="settings-limit" class="settings-limit">Selected 0/6</div>
+      <div id="settings-links" class="settings-links"></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

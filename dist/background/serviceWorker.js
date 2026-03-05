@@ -12,6 +12,13 @@ const AXIOM_POOL_KEY = "axiomPopupPoolAddress";
 let axiomPopupWindowId = null;
 let axiomPopupPoolAddress = null;
 
+function makeWindowUpdateOptions(left, top) {
+  const updateInfo = { focused: true };
+  if (typeof left === "number") updateInfo.left = left;
+  if (typeof top === "number") updateInfo.top = top;
+  return updateInfo;
+}
+
 function isAxiomUrl(url) {
   return !!url && /^https:\/\/axiom\.trade\//.test(url);
 }
@@ -319,7 +326,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
 
-          chrome.windows.update(existingWindow.id, { focused: true }, () => {
+          chrome.windows.update(existingWindow.id, makeWindowUpdateOptions(left, top), () => {
             if (chrome.runtime.lastError) {
               axiomPopupWindowId = null;
               void writeStoredWindowId(null);
@@ -345,7 +352,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (currentTab && currentTab.id) {
         chrome.tabs.update(currentTab.id, { active: true }, () => {
-          chrome.windows.update(existingWindow.id, { focused: true }, () => {
+          chrome.windows.update(existingWindow.id, makeWindowUpdateOptions(left, top), () => {
             if (chrome.runtime.lastError) {
               axiomPopupWindowId = null;
               void writeStoredWindowId(null);
@@ -364,7 +371,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      chrome.windows.update(existingWindow.id, { focused: true }, () => {
+      chrome.windows.update(existingWindow.id, makeWindowUpdateOptions(left, top), () => {
         if (chrome.runtime.lastError) {
           axiomPopupWindowId = null;
           void writeStoredWindowId(null);

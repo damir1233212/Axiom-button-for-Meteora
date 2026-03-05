@@ -323,28 +323,21 @@ export async function buildAxiomUrl(
 }
 
 function computePopupPosition(anchorRect?: PopupAnchorRect): { left?: number; top?: number } {
-  if (!anchorRect) return {};
-
-  const CHROME_X = Math.max(0, window.outerWidth - window.innerWidth);
-  const CHROME_Y = Math.max(0, window.outerHeight - window.innerHeight);
-  const viewportLeft = window.screenX + Math.floor(CHROME_X / 2);
-  const viewportTop = window.screenY + CHROME_Y;
-
   const POPUP_W = 420;
   const POPUP_H = 720;
-  const GAP = 15;
+  const GAP = 16;
 
-  let left = Math.round(viewportLeft + anchorRect.right + GAP);
-  let top = Math.round(viewportTop + anchorRect.bottom - POPUP_H);
+  const availLeft = typeof window.screen.availLeft === "number" ? window.screen.availLeft : window.screenX;
+  const availTop = typeof window.screen.availTop === "number" ? window.screen.availTop : window.screenY;
+  const availWidth = window.screen.availWidth;
+  const availHeight = window.screen.availHeight;
 
-  if (left + POPUP_W > window.screenX + window.screen.availWidth) {
-    left = Math.round(viewportLeft + Math.max(0, anchorRect.left - GAP - POPUP_W));
+  let left = Math.round(availLeft + GAP);
+  let top = Math.round(availTop + availHeight - POPUP_H - GAP);
+  if (left + POPUP_W > availLeft + availWidth) {
+    left = Math.max(availLeft, availLeft + availWidth - POPUP_W - GAP);
   }
-
-  if (top < window.screenY) top = window.screenY;
-  if (top + POPUP_H > window.screenY + window.screen.availHeight) {
-    top = Math.max(window.screenY, window.screenY + window.screen.availHeight - POPUP_H);
-  }
+  if (top < availTop) top = availTop;
 
   return { left, top };
 }

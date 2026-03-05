@@ -1,0 +1,163 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 320px;
+  background: #0f1115;
+  color: #e7ecf2;
+  font: 14px/1.3 "Segoe UI", Tahoma, sans-serif;
+}
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.title-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.title {
+  font-size: 13px;
+  color: #a9b2bf;
+}
+
+.icon-btn {
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #2a2f38;
+  border-radius: 8px;
+  background: #171b22;
+  color: #cfd8e3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: #1d232d;
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.link-btn {
+  appearance: none;
+  width: 100%;
+  border: 1px solid #2a2f38;
+  border-radius: 10px;
+  background: #171b22;
+  color: #e7ecf2;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.link-btn:hover {
+  background: #1d232d;
+}
+
+.link-btn.small {
+  font-size: 12px;
+  opacity: 0.88;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.tg-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.tg-btn {
+  appearance: none;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #2a2f38;
+  border-radius: 999px;
+  background: #229ed9;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.tg-btn:hover {
+  filter: brightness(1.06);
+}
+
+.tg-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.tg-label {
+  font-size: 12px;
+  color: #a9b2bf;
+  user-select: none;
+}
+
+.settings {
+  margin-top: 4px;
+  border: 1px solid #2a2f38;
+  border-radius: 10px;
+  background: #12161c;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings.hidden {
+  display: none;
+}
+
+.settings-title {
+  font-size: 12px;
+  color: #a9b2bf;
+}
+
+.settings-limit {
+  font-size: 11px;
+  color: #8f99a8;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #dfe6ef;
+}
+
+.setting-row input[type="checkbox"] {
+  margin: 0;
+  accent-color: #ff6b00;
+}
+
+.settings-links {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}

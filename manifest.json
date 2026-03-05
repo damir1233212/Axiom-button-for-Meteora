@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Axiom Swap Button for Meteora",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "description": "Adds Axiom swap and exit buttons on Meteora DLMM pages and assists Sell 100% flow.",
   "icons": {
     "16": "icons/icon16.png",
@@ -10,6 +10,8 @@
     "128": "icons/icon128.png"
   },
   "action": {
+    "default_popup": "popup.html",
+    "default_title": "Axiom Quick Links",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -25,6 +27,7 @@
     "https://app.meteora.ag/*",
     "https://www.meteora.ag/*",
     "https://dlmm-api.meteora.ag/*",
+    "https://dlmm.datapi.meteora.ag/*",
     "https://axiom.trade/*",
     "https://api.dexscreener.com/*",
     "https://api.geckoterminal.com/*"

@@ -51,7 +51,27 @@ function findSellControl(): HTMLElement | null {
   return null;
 }
 
+function findTradeControl(): HTMLElement | null {
+  const candidates = Array.from(document.querySelectorAll("button, [role='button'], [role='tab'], div, span, a"));
+  for (const node of candidates) {
+    if (!(node instanceof HTMLElement)) continue;
+    const text = (node.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (text !== "trade") continue;
+    const clickable = node.closest("button, [role='button'], [role='tab'], a, div.rounded-full");
+    const target = clickable instanceof HTMLElement ? clickable : node;
+    if (isVisible(target)) return target;
+  }
+  return null;
+}
+
 function clickSellControl(el: HTMLElement): void {
+  el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+}
+
+function clickTradeControl(el: HTMLElement): void {
   el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
   el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
   el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
@@ -169,6 +189,9 @@ function runAutoSellAllQuick(reason: string): void {
       console.debug(LOG_PREFIX, `Axiom sell amount already set (${reason})`);
     }
 
+    const trade = findTradeControl();
+    if (trade) clickTradeControl(trade);
+
     const sell = findSellControl();
     if (sell) clickSellControl(sell);
 
@@ -214,6 +237,9 @@ function initSellAutoselect(shouldAutoSellMax: boolean, force = false): void {
       return;
     }
 
+    const trade = findTradeControl();
+    if (trade) clickTradeControl(trade);
+
     const sell = findSellControl();
     if (sell) {
       clickSellControl(sell);
@@ -234,6 +260,9 @@ function initSellAutoselect(shouldAutoSellMax: boolean, force = false): void {
   }, ATTEMPT_INTERVAL_MS);
 
   const observer = new MutationObserver(() => {
+    const trade = findTradeControl();
+    if (trade) clickTradeControl(trade);
+
     const sell = findSellControl();
     if (!sell) return;
     clickSellControl(sell);

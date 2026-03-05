@@ -52,7 +52,27 @@
     return null;
   }
 
+  function findTradeControl() {
+    const candidates = Array.from(document.querySelectorAll("button, [role='button'], [role='tab'], div, span, a"));
+    for (const node of candidates) {
+      if (!(node instanceof HTMLElement)) continue;
+      const text = (node.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+      if (text !== "trade") continue;
+      const clickable = node.closest("button, [role='button'], [role='tab'], a, div.rounded-full");
+      const target = clickable instanceof HTMLElement ? clickable : node;
+      if (isVisible(target)) return target;
+    }
+    return null;
+  }
+
   function clickSellControl(el) {
+    el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  }
+
+  function clickTradeControl(el) {
     el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
     el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
@@ -165,6 +185,9 @@
       if (hasPositiveSellAmount()) {
       }
 
+      const trade = findTradeControl();
+      if (trade) clickTradeControl(trade);
+
       const sell = findSellControl();
       if (sell) clickSellControl(sell);
 
@@ -205,7 +228,10 @@
         return;
       }
 
-        const sell = findSellControl();
+      const trade = findTradeControl();
+      if (trade) clickTradeControl(trade);
+
+      const sell = findSellControl();
       if (sell) {
         clickSellControl(sell);
         if (shouldAutoSellMax) runAutoSellAllQuick("route");
@@ -222,7 +248,10 @@
       }
     }, ATTEMPT_INTERVAL_MS);
 
-    const observer = new MutationObserver(() => {
+  const observer = new MutationObserver(() => {
+      const trade = findTradeControl();
+      if (trade) clickTradeControl(trade);
+
       const sell = findSellControl();
       if (!sell) return;
       clickSellControl(sell);
