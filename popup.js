@@ -18,6 +18,7 @@
   ];
   const DEFAULT_CONFIG = {
     enabled: true,
+    poolWidgetEnabled: true,
     links: {
       jupiter: true,
       bananaGun: false,
@@ -45,10 +46,12 @@
   function normalizeConfig(raw) {
     const normalized = {
       enabled: DEFAULT_CONFIG.enabled,
+      poolWidgetEnabled: DEFAULT_CONFIG.poolWidgetEnabled,
       links: { ...DEFAULT_CONFIG.links }
     };
     if (!raw || typeof raw !== "object") return normalized;
     if (typeof raw.enabled === "boolean") normalized.enabled = raw.enabled;
+    if (typeof raw.poolWidgetEnabled === "boolean") normalized.poolWidgetEnabled = raw.poolWidgetEnabled;
     if (raw.links && typeof raw.links === "object") {
       for (const item of LINK_ITEMS) {
         if (typeof raw.links[item.key] === "boolean") {
@@ -114,9 +117,15 @@
   function renderSettings(config) {
     const linksWrap = document.getElementById("settings-links");
     const enabledInput = document.getElementById("dup-enabled");
-    if (!(linksWrap instanceof HTMLElement) || !(enabledInput instanceof HTMLInputElement)) return;
+    const poolWidgetInput = document.getElementById("pool-widget-enabled");
+    if (
+      !(linksWrap instanceof HTMLElement) ||
+      !(enabledInput instanceof HTMLInputElement) ||
+      !(poolWidgetInput instanceof HTMLInputElement)
+    ) return;
 
     enabledInput.checked = !!config.enabled;
+    poolWidgetInput.checked = !!config.poolWidgetEnabled;
     linksWrap.textContent = "";
 
     for (const item of LINK_ITEMS) {
@@ -160,9 +169,12 @@
 
   function collectConfigFromUi() {
     const enabledInput = document.getElementById("dup-enabled");
+    const poolWidgetInput = document.getElementById("pool-widget-enabled");
     const linksWrap = document.getElementById("settings-links");
     const next = {
       enabled: enabledInput instanceof HTMLInputElement ? enabledInput.checked : DEFAULT_CONFIG.enabled,
+      poolWidgetEnabled:
+        poolWidgetInput instanceof HTMLInputElement ? poolWidgetInput.checked : DEFAULT_CONFIG.poolWidgetEnabled,
       links: { ...DEFAULT_CONFIG.links }
     };
     if (linksWrap instanceof HTMLElement) {
@@ -197,9 +209,17 @@
     renderSettings(config);
 
     const enabledInput = document.getElementById("dup-enabled");
+    const poolWidgetInput = document.getElementById("pool-widget-enabled");
     const linksWrap = document.getElementById("settings-links");
     if (enabledInput instanceof HTMLInputElement) {
       enabledInput.addEventListener("change", () => {
+        const next = normalizeConfig(collectConfigFromUi());
+        renderSettings(next);
+        void saveConfig(next);
+      });
+    }
+    if (poolWidgetInput instanceof HTMLInputElement) {
+      poolWidgetInput.addEventListener("change", () => {
         const next = normalizeConfig(collectConfigFromUi());
         renderSettings(next);
         void saveConfig(next);

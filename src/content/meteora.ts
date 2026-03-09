@@ -9,6 +9,8 @@ const MID_LINKS_WRAP_ID = "swap-ext-mid-links-wrap";
 const MID_LINKS_ROW_ID = "swap-ext-mid-links-row";
 const MID_LINKS_MORE_WRAP_ID = "swap-ext-mid-links-more-wrap";
 const MID_LINKS_MORE_BTN_ID = "swap-ext-mid-links-more-btn";
+const MID_LINKS_SETTINGS_BTN_ID = "swap-ext-mid-links-settings-btn";
+const MID_LINKS_SETTINGS_PANEL_ID = "swap-ext-mid-links-settings-panel";
 const MID_LINKS_MENU_ID = "swap-ext-mid-links-menu";
 const NEWPOS_BTN_ID = "swap-ext-newpos-axiom-btn";
 const SAME_PAIR_WIDGET_ID = "swap-ext-same-pair-widget";
@@ -86,7 +88,11 @@ const cachedExternalLinksByLabel = new Map<string, string>();
 let lastPreparedMidLinks: Array<{ label: string; href: string }> = [];
 
 type ExternalLinkItem = { key: string; label: string };
-type ExternalLinksConfig = { enabled: boolean; links: Record<string, boolean> };
+type ExternalLinksConfig = {
+  enabled: boolean;
+  poolWidgetEnabled: boolean;
+  links: Record<string, boolean>;
+};
 type SamePairMetrics = {
   binStep: number | null;
   baseFee: number | null;
@@ -133,6 +139,7 @@ const EXTERNAL_LINK_ITEMS: ExternalLinkItem[] = [
 
 const DEFAULT_EXTERNAL_LINKS_CONFIG: ExternalLinksConfig = {
   enabled: true,
+  poolWidgetEnabled: true,
   links: {
     jupiter: true,
     bananaGun: false,
@@ -203,11 +210,13 @@ function getAxiomIconUrl(): string {
 function normalizeExternalLinksConfig(raw: unknown): ExternalLinksConfig {
   const normalized: ExternalLinksConfig = {
     enabled: DEFAULT_EXTERNAL_LINKS_CONFIG.enabled,
+    poolWidgetEnabled: DEFAULT_EXTERNAL_LINKS_CONFIG.poolWidgetEnabled,
     links: { ...DEFAULT_EXTERNAL_LINKS_CONFIG.links }
   };
   if (!raw || typeof raw !== "object") return normalized;
-  const cfg = raw as { enabled?: unknown; links?: Record<string, unknown> };
+  const cfg = raw as { enabled?: unknown; poolWidgetEnabled?: unknown; links?: Record<string, unknown> };
   if (typeof cfg.enabled === "boolean") normalized.enabled = cfg.enabled;
+  if (typeof cfg.poolWidgetEnabled === "boolean") normalized.poolWidgetEnabled = cfg.poolWidgetEnabled;
   if (cfg.links && typeof cfg.links === "object") {
     for (const item of EXTERNAL_LINK_ITEMS) {
       const value = cfg.links[item.key];
@@ -1121,6 +1130,145 @@ function closeMidLinksMenu(): void {
   }
 }
 
+function closeInlineSettingsPanel(): void {
+  const panel = document.getElementById(MID_LINKS_SETTINGS_PANEL_ID);
+  if (panel) panel.remove();
+  const btn = document.getElementById(MID_LINKS_SETTINGS_BTN_ID);
+  if (btn instanceof HTMLButtonElement) btn.setAttribute("aria-expanded", "false");
+}
+
+function collectInlineSettings(panel: HTMLElement): ExternalLinksConfig {
+  const enabledInput = panel.querySelector<HTMLInputElement>("[data-swap-ext-setting='enabled']");
+  const poolWidgetInput = panel.querySelector<HTMLInputElement>("[data-swap-ext-setting='poolWidgetEnabled']");
+  const next: ExternalLinksConfig = {
+    enabled: enabledInput?.checked ?? DEFAULT_EXTERNAL_LINKS_CONFIG.enabled,
+    poolWidgetEnabled: poolWidgetInput?.checked ?? DEFAULT_EXTERNAL_LINKS_CONFIG.poolWidgetEnabled,
+    links: { ...DEFAULT_EXTERNAL_LINKS_CONFIG.links }
+  };
+  const linkInputs = Array.from(panel.querySelectorAll<HTMLInputElement>("input[type='checkbox'][data-swap-ext-link-key]"));
+  for (const input of linkInputs) {
+    const key = input.dataset.swapExtLinkKey;
+    if (!key || !(key in next.links)) continue;
+    next.links[key] = input.checked;
+  }
+  return normalizeExternalLinksConfig(next);
+}
+
+function applyInlineSettingsLimitUi(panel: HTMLElement, config: ExternalLinksConfig): void {
+  const countEl = panel.querySelector<HTMLElement>("[data-swap-ext-selected-count='1']");
+  let selected = 0;
+  for (const item of EXTERNAL_LINK_ITEMS) {
+    if (config.links[item.key]) selected += 1;
+  }
+  if (countEl) countEl.textContent = `Selected ${selected}/${MAX_DUP_EXTERNAL_LINKS}`;
+  const atLimit = selected >= MAX_DUP_EXTERNAL_LINKS;
+  const linkInputs = Array.from(panel.querySelectorAll<HTMLInputElement>("input[type='checkbox'][data-swap-ext-link-key]"));
+  for (const input of linkInputs) {
+    input.disabled = atLimit && !input.checked;
+  }
+}
+
+function persistInlineSettings(config: ExternalLinksConfig): void {
+  liveExternalLinksConfig = config;
+  lastExternalLinksConfigSignature = JSON.stringify(config);
+  void storageSet({ [EXTERNAL_LINKS_SETTINGS_KEY]: config });
+  scheduleRouteCheck();
+}
+
+function openInlineSettingsPanel(anchorBtn: HTMLButtonElement): void {
+  closeMidLinksMenu();
+  closeInlineSettingsPanel();
+
+  const config = liveExternalLinksConfig || DEFAULT_EXTERNAL_LINKS_CONFIG;
+  const panel = document.createElement("div");
+  panel.id = MID_LINKS_SETTINGS_PANEL_ID;
+  panel.style.position = "fixed";
+  panel.style.minWidth = "260px";
+  panel.style.maxWidth = "340px";
+  panel.style.maxHeight = "70vh";
+  panel.style.overflow = "auto";
+  panel.style.display = "flex";
+  panel.style.flexDirection = "column";
+  panel.style.gap = "8px";
+  panel.style.padding = "10px";
+  panel.style.borderRadius = "10px";
+  panel.style.border = "1px solid rgba(255,255,255,0.12)";
+  panel.style.background = "rgba(16,18,24,0.98)";
+  panel.style.backdropFilter = "blur(8px)";
+  panel.style.boxShadow = "0 10px 30px rgba(0,0,0,0.35)";
+  panel.style.zIndex = "2147483647";
+
+  const title = document.createElement("div");
+  title.textContent = "Meteora Settings";
+  title.style.fontSize = "12px";
+  title.style.fontWeight = "600";
+  title.style.color = "#f3f4f6";
+  panel.appendChild(title);
+
+  const mkToggle = (labelText: string, key: "enabled" | "poolWidgetEnabled", checked: boolean): HTMLElement => {
+    const row = document.createElement("label");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "8px";
+    row.style.fontSize = "12px";
+    row.style.color = "#e5e7eb";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = checked;
+    input.dataset.swapExtSetting = key;
+    const text = document.createElement("span");
+    text.textContent = labelText;
+    row.append(input, text);
+    return row;
+  };
+  panel.appendChild(mkToggle("Duplicate external links in top panel", "enabled", !!config.enabled));
+  panel.appendChild(mkToggle("Other Pools widget", "poolWidgetEnabled", !!config.poolWidgetEnabled));
+
+  const count = document.createElement("div");
+  count.dataset.swapExtSelectedCount = "1";
+  count.style.fontSize = "11px";
+  count.style.color = "#9ca3af";
+  panel.appendChild(count);
+
+  const linksWrap = document.createElement("div");
+  linksWrap.style.display = "grid";
+  linksWrap.style.gap = "6px";
+  for (const item of EXTERNAL_LINK_ITEMS) {
+    const row = document.createElement("label");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "8px";
+    row.style.fontSize = "12px";
+    row.style.color = "#e5e7eb";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!config.links[item.key];
+    input.dataset.swapExtLinkKey = item.key;
+    const text = document.createElement("span");
+    text.textContent = item.label;
+    row.append(input, text);
+    linksWrap.appendChild(row);
+  }
+  panel.appendChild(linksWrap);
+
+  panel.addEventListener("change", () => {
+    const next = collectInlineSettings(panel);
+    applyInlineSettingsLimitUi(panel, next);
+    persistInlineSettings(next);
+  });
+  applyInlineSettingsLimitUi(panel, config);
+  document.body.appendChild(panel);
+
+  const rect = anchorBtn.getBoundingClientRect();
+  const pw = Math.ceil(panel.getBoundingClientRect().width) || 300;
+  const ph = Math.ceil(panel.getBoundingClientRect().height) || 220;
+  const left = Math.max(8, Math.min(rect.right - pw, window.innerWidth - pw - 8));
+  const top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - ph - 8));
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+  anchorBtn.setAttribute("aria-expanded", "true");
+}
+
 function getOrCreateMidLinksPortalMenu(): HTMLDivElement {
   let menu = document.getElementById(MID_LINKS_PORTAL_MENU_ID);
   if (menu instanceof HTMLDivElement) return menu;
@@ -1183,10 +1331,12 @@ function applyMidLinksOverflowLayout(): void {
   const row = document.getElementById(MID_LINKS_ROW_ID);
   const moreWrap = document.getElementById(MID_LINKS_MORE_WRAP_ID);
   const moreBtn = document.getElementById(MID_LINKS_MORE_BTN_ID);
+  const settingsBtn = document.getElementById(MID_LINKS_SETTINGS_BTN_ID);
   const menu = getOrCreateMidLinksPortalMenu();
   if (!(row instanceof HTMLDivElement)) return;
   if (!(moreWrap instanceof HTMLDivElement)) return;
   if (!(moreBtn instanceof HTMLButtonElement)) return;
+  const menuWasOpen = menu.style.display === "flex";
 
   const links = Array.from(row.querySelectorAll("a")).filter(
     (el): el is HTMLAnchorElement => el instanceof HTMLAnchorElement
@@ -1207,16 +1357,15 @@ function applyMidLinksOverflowLayout(): void {
       wrap.style.minWidth = "0";
       moreWrap.style.marginLeft = "0px";
       moreWrap.style.marginRight = "0px";
+      closeMidLinksMenu();
     }
     return;
   }
   for (const link of links) {
     link.style.display = "inline-flex";
   }
-  closeMidLinksMenu();
   moreWrap.style.display = "none";
   moreWrap.style.visibility = "";
-  menu.textContent = "";
 
   const wrapRect = wrap.getBoundingClientRect();
   let leftLimit = wrapRect.left + 2;
@@ -1255,7 +1404,9 @@ function applyMidLinksOverflowLayout(): void {
     moreWrap.style.visibility = "";
     return w;
   })();
-  const availableWidth = Math.max(0, Math.floor(rightLimit - leftLimit - reserveBtnWidth - 4));
+  const settingsBtnWidth =
+    settingsBtn instanceof HTMLElement ? Math.ceil(settingsBtn.getBoundingClientRect().width) + uniformGapPx : 0;
+  const availableWidth = Math.max(0, Math.floor(rightLimit - leftLimit - reserveBtnWidth - settingsBtnWidth - 4));
   if (availableWidth <= 48) {
     if (midLinksLastHiddenCount > 0) {
       moreWrap.style.display = "inline-flex";
@@ -1269,6 +1420,7 @@ function applyMidLinksOverflowLayout(): void {
       wrap.style.minWidth = "0";
       moreWrap.style.marginLeft = "0px";
       moreWrap.style.marginRight = "0px";
+      closeMidLinksMenu();
     }
     return;
   }
@@ -1314,6 +1466,7 @@ function applyMidLinksOverflowLayout(): void {
     moreWrap.style.marginRight = "0px";
     wrap.style.minWidth = "0";
     midLinksLastHiddenCount = 0;
+    closeMidLinksMenu();
     return;
   }
   moreWrap.style.display = "inline-flex";
@@ -1332,6 +1485,9 @@ function applyMidLinksOverflowLayout(): void {
     }
   }
   midLinksLastHiddenCount = hiddenCount;
+  if (menuWasOpen) {
+    openMidLinksMenu(moreBtn);
+  }
 }
 
 function scheduleMidLinksLayout(): void {
@@ -1354,10 +1510,16 @@ function bindMidLinksGlobalEvents(): void {
     if (moreWrap && moreWrap.contains(target)) return;
     const portal = document.getElementById(MID_LINKS_PORTAL_MENU_ID);
     if (portal && portal.contains(target)) return;
+    const settingsBtn = document.getElementById(MID_LINKS_SETTINGS_BTN_ID);
+    if (settingsBtn && settingsBtn.contains(target)) return;
+    const settingsPanel = document.getElementById(MID_LINKS_SETTINGS_PANEL_ID);
+    if (settingsPanel && settingsPanel.contains(target)) return;
     closeMidLinksMenu();
+    closeInlineSettingsPanel();
   });
   window.addEventListener("resize", () => {
     closeMidLinksMenu();
+    closeInlineSettingsPanel();
     scheduleMidLinksLayout();
   });
 
@@ -1396,6 +1558,7 @@ function bindMidLinksResizeObserver(): void {
 
 function removeMidLinksWrap(): void {
   closeMidLinksMenu();
+  closeInlineSettingsPanel();
   if (midLinksLayoutRaf !== null) {
     window.cancelAnimationFrame(midLinksLayoutRaf);
     midLinksLayoutRaf = null;
@@ -2023,7 +2186,7 @@ function samePairRenderList(result: SamePairFetchResult, context: PoolContext): 
     row.style.cursor = "pointer";
     row.style.borderRadius = "8px";
     const isCurrent = context.poolAddress === item.poolAddress;
-    row.style.background = isCurrent ? "rgba(16, 185, 129, 0.16)" : "rgba(31, 41, 55, 0.55)";
+    row.style.background = isCurrent ? "rgba(249, 115, 22, 0.22)" : "rgba(31, 41, 55, 0.55)";
 
     const addCell = (value: string, align: "left" | "right"): void => {
       const td = document.createElement("td");
@@ -2031,7 +2194,7 @@ function samePairRenderList(result: SamePairFetchResult, context: PoolContext): 
       td.style.padding = "6px 8px";
       td.style.whiteSpace = "nowrap";
       td.style.textAlign = align;
-      td.style.color = isCurrent ? "#d1fae5" : "#e5e7eb";
+      td.style.color = isCurrent ? "#ffedd5" : "#e5e7eb";
       row.appendChild(td);
     };
 
@@ -2191,6 +2354,11 @@ async function samePairRunPoll(): Promise<void> {
 }
 
 function ensureSamePairPoolsWidget(): void {
+  const effectiveConfig = liveExternalLinksConfig || DEFAULT_EXTERNAL_LINKS_CONFIG;
+  if (!effectiveConfig.poolWidgetEnabled) {
+    samePairStopPolling(true);
+    return;
+  }
   const url = new URL(window.location.href);
   if (!isSupportedPoolUrl(url)) {
     samePairStopPolling(true);
@@ -2374,6 +2542,30 @@ async function ensureMiddleExternalLinks(): Promise<void> {
   };
   moreWrap.append(moreBtn);
   wrap.appendChild(moreWrap);
+
+  const settingsBtn = document.createElement("button");
+  settingsBtn.id = MID_LINKS_SETTINGS_BTN_ID;
+  settingsBtn.type = "button";
+  settingsBtn.textContent = "\u2699";
+  settingsBtn.className =
+    "inline-flex items-center justify-center rounded-md border border-v2-border-secondary " +
+    "bg-transparent hover:bg-v2-base-1 text-v2-text-primary transition-colors text-sm py-1 px-2";
+  settingsBtn.style.marginLeft = "4px";
+  settingsBtn.style.flex = "0 0 auto";
+  settingsBtn.title = "Extension settings";
+  settingsBtn.setAttribute("aria-label", "Extension settings");
+  settingsBtn.setAttribute("aria-expanded", "false");
+  settingsBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const panel = document.getElementById(MID_LINKS_SETTINGS_PANEL_ID);
+    if (panel) {
+      closeInlineSettingsPanel();
+      return;
+    }
+    openInlineSettingsPanel(settingsBtn);
+  });
+  wrap.appendChild(settingsBtn);
 
   const actionsWrap = document.getElementById(ACTIONS_WRAP_ID);
   if (actionsWrap && actionsWrap.parentElement === tabsHost) {

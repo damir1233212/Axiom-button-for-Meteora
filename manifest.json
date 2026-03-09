@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Axiom Swap Button for Meteora",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Adds Axiom swap and exit buttons on Meteora DLMM pages and assists Sell 100% flow.",
   "icons": {
     "16": "icons/icon16.png",
